@@ -34,6 +34,18 @@
 
 本节不选择最终 observation boundary、Collector、database、API 或 technology stack。
 
+## 0.1 Project-Level Runtime and Metering Policy
+
+**Project-Level Decision**
+
+- `Xray` 是 SparkLink-wide production primary；`sing-box` 是 DR / technology hedge。
+- strategic role / desired policy 与 live observed runtime state 必须分开记录；该 policy 不覆盖 2026-08-24 audit 的 observed facts。
+- Iteration #1 primary metering observation surface 是 Xray production paths；sing-box accounting 保留为 extension boundary。
+- 若后续 evidence 证明某 sing-box path 当前承载 production user traffic，必须显式记录 coverage gap 并作出纳入计量的 decision。
+- Metering 是旁路 observational capability，不成为 production proxy data path 的 inline dependency；metering failure 不得导致 data plane failure。
+
+上述是 project-level policy，不是对当前三 VPS live runtime 的重新分类。
+
 ## 1. Current User Traffic Paths
 
 ### 1.1 Common client-side path
@@ -136,28 +148,29 @@ Cloudflare Edge、Cloudflare-proxied XHTTP 与 VPS data plane 之间存在至少
 
 ## 2. Current Node, Runtime, and Resource Context
 
-### 2.1 Concrete infrastructure Nodes
+### 2.1 Infrastructure Resource and Node context
 
 **Known from Existing Project Context**
 
 - 主要 VPS provider/host context 包括 RackNerd、DediRock、VMISS。
-- 同一 VPS 上可能存在多个 protocol listeners、relay paths 或 runtime processes；“一台 VPS”不自动等于一个可计量 Node。
+- `Infrastructure Resource` 表示 Provider 购买资源；`Node` 表示 SparkLink operational identity。换 IP、OS reinstall 或 runtime update 不创建新的 Node；替换为另一份 Provider resource 时创建新的 Node，旧 Node 为 `Retired`，Pool membership/history 保留。
+- 同一 VPS 上可能存在多个 protocol listeners、relay paths 或 runtime processes；“一台 VPS”不自动等于一个可计量 Node，也不表示 live audit 已建立 canonical Node identity。
 - `Native`、`HyTru`、`Origin`、`Edge`、`Basic`、`Plus` 和 `VeilShift-Optimized` 是既有 route、subscription 或 capability labels，不应直接当作 User、Credential 或 stable concrete Node identity。
 - 既有 Basic/Plus subscription 曾使用 strict-superset contract；历史 Node counts 随 protocol retirement、独立 subscription 和 membership refresh 变化。
 
 **Observed / Verified Fact — 2026-08-24 audit**
 
-| Node context | Current runtime baseline | Identity/statistics evidence |
+| Infrastructure Resource context | Current runtime baseline | Identity/statistics evidence |
 | --- | --- | --- |
 | RackNerd | x-ui-managed Xray 26.6.1；3x-ui SQLite | Xray email/user-ref、persistent `client_traffics`、Stats API available |
 | DediRock | systemd-managed Xray 26.7.28 + sing-box 1.13.16 + Nginx | Xray email/user-ref；Stats API absent；AnyTLS per-user accounting unknown |
 | VMISS | x-ui-managed Xray 26.7.28 + sing-box 1.13.16 + WireProxy | Xray email/user-ref、persistent `client_traffics`、Stats API available |
 
-2026-08-24 audit 是当前 Node/runtime structure 的 baseline；细节见 `docs/runtime/2026-08-24_THREE_VPS_LIVE_RUNTIME_BASELINE.md`。
+2026-08-24 audit 是当前 Infrastructure Resource/runtime structure 的 baseline；它没有建立 canonical Node identity。细节见 `docs/runtime/2026-08-24_THREE_VPS_LIVE_RUNTIME_BASELINE.md`。
 
 **Unknown / Needs Verification**
 
-- 当前 baseline 对每个 concrete Node 的 canonical ID、provider ID、pool membership interval、protocol membership 和 replacement history 没有记录。
+- 当前 baseline 对每个 Infrastructure Resource 的 provider ID、assigned Node canonical ID、pool membership interval、protocol membership 和 replacement history 没有记录。
 - 当前 Basic、Plus、VeilShift-Optimized 的 canonical User mapping 与 active v2rayN membership 未在 audit 中建立；Node/runtime snapshot 本身已按 2026-08-24 audit 更新。
 - Node 从 Standard/Premium 或其他 future Resource Pool 归属变化时，历史 Usage 的归属规则未知。
 
@@ -311,10 +324,10 @@ Metering/management plane 必须以旁路、可降级和可恢复为设计约束
 
 以下只是后续 Architecture Design 可比较的 observation boundary，不表示选择：
 
-1. **Client/profile boundary**：观察 selected Subscription、Credential reference、local session 或 client-side bytes；主要问题是 User attribution 与 local-only visibility。
-2. **Protocol ingress boundary**：在 Xray/sing-box 的 per-user/per-inbound boundary 观察 bytes；2026-08-24 已证明 RackNerd/VMISS Xray Stats API 可读、DediRock Xray Stats API 缺失；主要问题仍是不同 protocol/runtime 的 statistics semantics 与 counter availability。
+1. **Client/profile boundary**：观察 selected Subscription、Credential reference、local session 或 client-side bytes；Subscription 只能作为 correlation evidence，不能作为 Usage attribution authority；主要问题是 User attribution 与 local-only visibility。
+2. **Protocol ingress boundary**：Iteration #1 primary surface 是 Xray production paths；可在 Xray 的 per-user/per-inbound boundary 观察 bytes。2026-08-24 已证明 RackNerd/VMISS Xray Stats API 可读、DediRock Xray Stats API 缺失；sing-box accounting 保留 extension boundary，主要问题仍是不同 protocol/runtime 的 statistics semantics 与 counter availability。
 3. **Transport/relay boundary**：在 Nginx、XHTTP、WireProxy/WARP 或 Cloudflare Edge 观察 request/transfer；主要问题是重复计量、加密层不可见、shared egress 和 end-to-end attribution。
-4. **Concrete Node boundary**：在 VPS Node 或 service listener 汇总 Usage；主要问题是同一 VPS 多 runtime、多 protocol、Node replacement 和 Resource Pool membership。
+4. **Serving Node / Infrastructure Resource boundary**：在 serving Node、Infrastructure Resource 或 service listener 汇总 Usage；主要问题是同一 VPS 多 runtime、多 protocol、Node replacement 和 Resource Pool membership。
 5. **Provider boundary**：观察 provider resource/accounting records；主要问题是 Customer Usage 与 Infrastructure Usage 的 reconciliation，而不是 User-level proxy attribution。
 6. **Reconciliation boundary**：比较多个 source 的 totals、timestamps 和 known gaps；这是可能的 observability concern，不代表已决定建立某种 database 或 Collector。
 
@@ -326,8 +339,8 @@ Metering/management plane 必须以旁路、可降级和可恢复为设计约束
 
 | Requirements question | Why it blocks |
 | --- | --- |
-| Primary observation surface：哪些 current protocol/runtime 属于 Iteration #1 primary target，哪些保持 legacy/deferred | 2026-08-24 audit 已确认多条 live path；若不先划定 topology surface，无法确定需要保护和观察的 production boundary |
-| Node canonical identity、Resource Pool membership interval、replacement 与跨 period attribution（对应 Open Question 3 的 topology 部分） | 没有 Node identity interval 与 pool membership semantics，FR-08、FR-10、FR-15 无法定义历史聚合边界 |
+| Xray production paths 与 sing-box/legacy paths 的具体 coverage boundary | 已决定 Xray 是 primary surface，但仍需明确具体 production path 的 coverage 与 gap 表达方式；不能把 strategic role 当作 live runtime absence |
+| Node canonical identity、Resource Pool membership interval 与跨 period attribution（对应 Open Question 3 的 topology 部分） | Node replacement 的 identity rule 已决定，但没有 Node identity interval 与 pool membership semantics，FR-08、FR-10、FR-15 仍无法定义完整历史聚合边界 |
 | User-to-Credential/Subscription-to-Node mapping 放在哪个受控边界，以及 technical email/user-ref 如何关联 stable User | audit 只验证 per-node technical user-ref capability，没有中央 User directory；没有该 topology，FR-01、FR-09、FR-10 无法跨节点聚合 |
 | Metering/management plane 与 existing proxy data plane 的隔离边界 | FR-17 与 NFR-03 要求 metering failure 不使 data plane unavailable；需要先确定观察关系和故障边界，才能继续设计 topology |
 

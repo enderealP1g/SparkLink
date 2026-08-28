@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Document status | Requirements baseline — review pending |
+| Document status | Requirements baseline — reviewed and committed |
 | Iteration | Training Iteration #1 |
 | Scope | User identity concepts and usage metering/observability |
 | Decision authority | Product Owner 对未决的产品与运营策略问题拥有裁决权 |
@@ -65,13 +65,17 @@ Plan 与 Entitlement 是两个概念。Plan 本身不等于某项已经实际拥
 - `Standard`
 - `Premium`
 
+### Infrastructure Resource
+
+`Infrastructure Resource` 表示由 Provider 购买并管理的具体基础设施资源。它承载 provider、cost、renewal、replacement 等 infrastructure lifecycle facts，不等同于 `Node`。
+
 ### Node
 
-`Node` 是能够承载 proxy traffic 的具体 infrastructure resource。Node 可以在相关 period 内属于某个 Resource Pool。Node identity 与 pool membership 必须保持可区分。
+`Node` 表示由 SparkLink 分配给 Infrastructure Resource 的稳定 operational identity，能够用于表达承载 proxy traffic 的 serving identity。对同一 Infrastructure Resource 进行换 IP、OS reinstall 或 runtime update 不创建新的 Node；替换为另一份 Provider resource 时创建新的 Node，旧 Node 进入 `Retired`，其 Pool membership 与 history 保留。Node identity 与 pool membership 必须保持可区分。
 
 ### Usage
 
-`Usage` 是在带有 timestamp 的 interval 或定义好的 reporting period 内，归因到某个 User 和具体 Node 的 resource consumption observation。Usage 是历史 evidence，不是根据 User 当前 Plan 或 Entitlement 重新计算出的 view。
+`Usage` 是在带有 timestamp 的 interval 或定义好的 reporting period 内，归因到某个 User 和具体 Node 的 resource consumption observation。runtime technical identity 应通过 Credential/User mapping 进行归因；`Subscription` 不是 Usage attribution authority。Usage 是历史 evidence，不是根据 User 当前 Plan 或 Entitlement 重新计算出的 view。
 
 ### Billing cycles
 

@@ -5,8 +5,8 @@ This directory contains the traceable project documentation for SparkLink.
 ## Areas
 
 - `requirements/` — baseline requirements and iteration specifications.
-- `architecture/` — system boundaries and architecture descriptions; reserved for a later iteration.
-- `decisions/` — recorded decisions and their rationale; reserved for a later iteration.
+- `architecture/` — system boundaries and architecture descriptions; Candidate/To-Be Architecture remains reserved for a later phase.
+- `decisions/` — accepted project-level decisions and their rationale.
 - `operations/` — operational procedures and observability guidance; reserved for a later iteration.
 
 The current documented baseline is [Training Iteration #1: User Identity + Usage Metering](requirements/ITERATION_01_USAGE_METERING.md).
