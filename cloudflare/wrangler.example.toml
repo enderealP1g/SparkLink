@@ -1,0 +1,16 @@
+name = "sparklink-edge"
+main = "sparklink-edge-worker.js"
+compatibility_date = "2026-08-29"
+
+[vars]
+# Use the QQG management path only after origin TLS, DNS and access controls
+# are reviewed. Do not put tokens or private keys in this file.
+CONTROL_PLANE_ORIGIN = "https://hypro02-cdn.enrpiglink.top:2053"
+BASIC_PATH = "/legacy/basic"
+PLUS_PATH = "/legacy/plus"
+
+# Bind the existing legacy KV only if the previous Worker compatibility paths
+# are intentionally retained. The namespace id must be supplied out of Git.
+# [[kv_namespaces]]
+# binding = "SUBSCRIPTIONS"
+# id = "REPLACE_WITH_KV_NAMESPACE_ID"

@@ -1,0 +1,23 @@
+[Unit]
+Description=SparkLink MVP Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sparklink
+Group=sparklink
+WorkingDirectory=/opt/sparklink-control-plane
+EnvironmentFile=/etc/sparklink/control-plane.env
+ExecStart=/usr/bin/python3 /opt/sparklink-control-plane/src/sparklink_control_plane.py serve --db /var/lib/sparklink/control-plane/sparklink.db --host 127.0.0.1 --port 8080 --subscription-base-url https://sub.enrpiglink.top
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sparklink/control-plane
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

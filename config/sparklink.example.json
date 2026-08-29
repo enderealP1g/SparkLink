@@ -1,0 +1,8 @@
+{
+  "endpoint": "https://spark.enrpiglink.top",
+  "nodes": [
+    {"node_id": "racknerd", "ssh_host": "racknerd-admin"},
+    {"node_id": "vmiss", "ssh_host": "la9929"},
+    {"node_id": "hypro02", "ssh_host": "sparklink-node-166"}
+  ]
+}

@@ -23,3 +23,11 @@ target/
 dist/
 build/
 node_modules/
+
+# Local application/runtime state
+runtime/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+.pytest_cache/

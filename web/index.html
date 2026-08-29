@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SparkLink Portal</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 920px; margin: 2rem auto; padding: 0 1rem; color: #172033; }
+    section { border: 1px solid #d9dee8; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+    table { border-collapse: collapse; width: 100%; } th, td { border-bottom: 1px solid #e6e9ef; padding: .55rem; text-align: left; }
+    input, select, button { font: inherit; padding: .45rem; margin: .2rem; } .muted { color: #64748b; }
+    .warn { color: #9a3412; } .ok { color: #166534; } code { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>SparkLink Portal</h1>
+  <p class="muted">这是最小 production MVP view。Usage 为 observation-derived；Unknown 不表示 0。</p>
+  <section id="login">
+    <label>User access token <input id="token" type="password" size="42" autocomplete="off"></label>
+    <button id="load">查看</button>
+    <p class="muted">请使用 Admin 通过受保护渠道发放的个人 access token。</p>
+  </section>
+  <section id="user" hidden>
+    <h2>User</h2><p id="identity"></p>
+    <p>Plan: <strong id="plan"></strong> · Subscription: <strong id="subscription"></strong></p>
+    <p>Customer Billing Cycle: <span id="cycle"></span></p>
+    <p>Total Usage: <strong id="total"></strong></p>
+    <p id="sub-link"></p>
+    <h2>Usage</h2>
+    <table><thead><tr><th>Resource Pool</th><th>Used</th><th>Allowance</th><th>Remaining</th><th>Coverage</th></tr></thead><tbody id="pools"></tbody></table>
+    <h2>Upgrade</h2>
+    <select id="upgrade"><option>Basic</option><option>Plus</option></select><button id="request">发起 upgrade request</button>
+    <p id="upgrade-result" class="muted"></p>
+  </section>
+  <script>
+    const q = (id) => document.getElementById(id);
+    const bytes = (v) => v === null || v === undefined ? 'Unknown' : `${(v / 1e9).toFixed(3)} GB`;
+    let accessToken = sessionStorage.getItem('sparklink_token') || '';
+    q('token').value = accessToken;
+    async function loadView() {
+      accessToken = q('token').value.trim();
+      sessionStorage.setItem('sparklink_token', accessToken);
+      const r = await fetch('/api/me', {headers: {'Authorization': `Bearer ${accessToken}`}});
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || 'Unable to load'); return; }
+      q('login').hidden = true; q('user').hidden = false;
+      q('identity').textContent = `${data.display_name} (${data.user_id})`;
+      q('plan').textContent = data.plan; q('subscription').textContent = data.subscription_status;
+      q('cycle').textContent = data.customer_billing_cycle ? (data.customer_billing_cycle.cycle_key || 'configured') : 'Unknown / Needs Configuration';
+      q('total').textContent = bytes(data.total_usage_bytes);
+      q('sub-link').innerHTML = data.subscription_url ? `Subscription: <a href="${data.subscription_url}">获取 V2rayN/V2rayNG subscription</a>` : 'Subscription: Not configured';
+      q('pools').innerHTML = data.pools.map(p => `<tr><td>${p.pool_id}</td><td>${bytes(p.used_bytes)}</td><td>${bytes(p.allowance_bytes)}</td><td>${bytes(p.remaining_bytes)}</td><td class="${p.coverage_status === 'available' ? 'ok' : 'warn'}">${p.coverage_status}</td></tr>`).join('');
+      q('upgrade-result').textContent = data.latest_upgrade_request ? `Latest request: ${data.latest_upgrade_request.status}` : '';
+    }
+    q('load').onclick = loadView;
+    q('request').onclick = async () => {
+      const r = await fetch('/api/me/upgrade', {method: 'POST', headers: {'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json'}, body: JSON.stringify({target_plan: q('upgrade').value})});
+      const data = await r.json(); q('upgrade-result').textContent = data.error || `Request ${data.request_id}: ${data.status}`;
+    };
+    if (accessToken) loadView();
+  </script>
+</body>
+</html>

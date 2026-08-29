@@ -12,3 +12,5 @@ SparkLink is a private learning and operations project for exploring the lifecyc
 ## Status
 
 Training Iteration #1: User Identity + Usage Metering
+
+Production MVP vertical slice 已在 QQG origin 完成受保护的 User/Usage/Subscription 验证；Cloudflare public edge cutover 尚未宣称完成。
