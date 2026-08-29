@@ -11,10 +11,10 @@
 
 ## Security contract
 
-- Control Plane SQLite `users` 只保存 `portal_token_hash` 与 `subscription_token_hash`；legacy `subscription_token` 列已迁移并移除。
+- Control Plane SQLite `users` 只保存 `portal_token_hash`、`subscription_token_hash`，以及可选的 hash-only `subscription_token_legacy_hash` grace slot；legacy plaintext `subscription_token` 列已迁移并移除。
 - Portal token 与 Subscription token 是两种独立 credential。Portal 只用于 Bearer `/api/me`；Subscription 只用于 `X-SparkLink-Subscription-Token`、`/subscription` 或带 token 的 `/u/<token>` delivery path。
 - Admin issuance 原子替换所选 hash；旧 token 随 hash replacement 立即失效。`revoke_old=false` 不被接受。
-- Plaintext 只在本次 issuance 的受保护响应到 Windows operator memory 和 one-time ignored delivery bundle 中存在；不写入 Git、日志、operations docs 或聊天。
+- Plaintext 只在 issuance 的受保护响应、可信 local bundle re-home 或新的 ignored delivery bundle 中存在；不写入 Git、日志、operations docs 或聊天。
 - Windows delivery 位于 ignored `runtime\delivery`，文件以当前 operator ACL 保护。Admin secret 继续从 ignored LocalMachine DPAPI path 读取，不进入 CLI 参数或日志。
 - 遗失 plaintext 不尝试恢复；没有 legacy plaintext 可供一次性 transition preservation 时，operator 只返回 rotate-required failure。
 
@@ -27,11 +27,18 @@ python deploy\issue_user_tokens.py list
 python deploy\issue_user_tokens.py issue --user-id <USER_ID> --token-kind portal
 python deploy\issue_user_tokens.py issue --user-id <USER_ID> --token-kind subscription
 python deploy\issue_user_tokens.py issue --user-id <USER_ID> --token-kind both
+python deploy\issue_user_tokens.py reconcile
 python deploy\issue_user_tokens.py verify --bundle runtime\delivery\<BUNDLE>.json
-python deploy\issue_user_tokens.py copy --bundle runtime\delivery\<BUNDLE>.json --kind portal
+python deploy\issue_user_tokens.py copy --user Hegin --kind subscription
+python deploy\issue_user_tokens.py copy --user Hegin --kind portal
+python deploy\issue_user_tokens.py revoke-legacy --user-id <USER_ID>
 ```
 
-`issue` 始终要求 `revoke_old=true`，把本次选择的 plaintext 写入受保护 bundle，并默认执行 new/wrong/cross-kind verification。需要验证已知旧 token 时，显式传入上一份 bundle，并使用 `--consume-old-bundle`；该临时 bundle 会在 old-token rejection 成功后删除。`copy` 是显式 local-only clipboard helper，不会自动复制或向聊天输出 secret。
+`reconcile` 是六用户交付闭环：它只接受当前的 `root`、`Hegin`、`abing`、`dangbin`、`liuwen`、`zhanhao` 六个 active User，输出 `runtime\delivery\<username>\delivery.json` 与 OWNER-only `OWNER-DELIVERY-INDEX.json`。已有可信 bundle 会复用并规范化；plaintext 已不可恢复的 User 才会 issue。对这次五个缺失 bundle 的 User，Portal 旧 hash 立即替换，Subscription 新 hash 生效但旧 Subscription hash 保留为 grace，直到显式 `revoke-legacy`；因此 reconcile 不会为了生成交付材料无条件撤销旧 shared/legacy Subscription。
+
+每个新 bundle 写入后都会做 local Control Plane new/wrong/cross-kind checks，并直接 GET 公网 `sub.enrpiglink.top/u/<token>`，验证 HTTP projection、计划对应的 pool/count/protocol；Free 当前无 entitlement 时预期为 `not_configured`，而不是伪造空的 available subscription。`copy --user <username> --kind portal` 复制 Portal token；`copy --user <username> --kind subscription` 复制完整 Subscription URL。两者都只在显式执行时写入本机 clipboard，stdout 不输出 secret。
+
+`issue` 默认 `revoke_old=true`，把本次选择的 plaintext 写入受保护 bundle，并执行 new/wrong/cross-kind verification。需要 staged Subscription migration 时使用 `--retain-old-subscription`；旧 token rejection 不能与该保留模式混用。需要验证已知旧 token 时，显式传入上一份 bundle，并使用 `--consume-old-bundle`；该临时 bundle 会在 old-token rejection 成功后删除。`revoke-legacy` 只清除数据库中的 retained Subscription hash，不会生成或回显任何 plaintext。
 
 Admin API 仅提供非 secret user metadata list，以及 `POST /api/admin/token-issuance`。API 的 issuance response 是唯一的 plaintext handoff；operator stdout 只输出 user id、bundle path、verification result 和固定安全状态。
 
@@ -47,7 +54,10 @@ Admin API 仅提供非 secret user metadata list，以及 `POST /api/admin/token
 - root Portal new token 被接受；本轮 superseded Portal token、随机 wrong Portal token、Portal-as-Subscription 均被拒绝。
 - root 当前 Subscription URL 未被 rotate，迁移后仍被接受；随机 wrong Subscription token、Subscription-as-Portal 均被拒绝。
 - Portal 页面已完成真实登录；安全 `/api/me` acceptance 检查确认 root self-scope、`Plus`、`OWNER`、`legacy-pre-baseline` Customer Cycle（`Asia/Shanghai`）以及恰好独立的 `STANDARD`/`PREMIUM` pools。
-- Admin metadata list 实际返回 6 个 User。除 root Portal token 的本次 issuance/verification 外，没有自动 rotate 其它 User 的现有 token。
+- Admin metadata list 实际返回 6 个 User。首轮 root Portal issuance/verification 没有 rotate 其它 User；后续六用户 reconcile 只对没有可信 plaintext bundle 的 Hegin、abing、dangbin、liuwen、zhanhao issue 新 credential，并保留各自旧 Subscription grace hash。
+- 六用户 delivery reconciliation 已完成：root 复用可信 Portal/Subscription bundle；Hegin、abing、dangbin、liuwen、zhanhao 各自拥有新的 per-user bundle，旧 Subscription grace hash 保留；OWNER index 只含 User、Plan、bundle path、Portal token status、Subscription status、migration status。
+- 公网 projection 实际验证为 Plus=6 条 vless（STANDARD+PREMIUM）、Basic=2 条 vless（STANDARD）、Free=not_configured；没有 AnyTLS 出现在新 Subscription projection。
+- 六个 Portal token 的 `/api/me` 均只返回对应 User；跨 User query 仍保持 self-scope，Subscription token 不能作为 Portal credential。
 
 ## Rollback and retention
 

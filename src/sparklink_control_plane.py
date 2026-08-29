@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS users (
     status TEXT NOT NULL,
     portal_token_hash TEXT NOT NULL UNIQUE,
     subscription_token_hash TEXT NOT NULL UNIQUE,
+    subscription_token_legacy_hash TEXT UNIQUE,
     created_at TEXT NOT NULL
 );
 
@@ -357,6 +358,7 @@ class ControlPlane:
                 status TEXT NOT NULL,
                 portal_token_hash TEXT NOT NULL UNIQUE,
                 subscription_token_hash TEXT NOT NULL UNIQUE,
+                subscription_token_legacy_hash TEXT UNIQUE,
                 created_at TEXT NOT NULL
             )
         """
@@ -367,6 +369,7 @@ class ControlPlane:
             "users": {
                 "role": "TEXT NOT NULL DEFAULT 'CUSTOMER'",
                 "subscription_token_hash": "TEXT",
+                "subscription_token_legacy_hash": "TEXT",
             },
             "billing_cycles": {
                 "cycle_kind": "TEXT NOT NULL DEFAULT 'legacy'",
@@ -398,7 +401,7 @@ class ControlPlane:
         # missing value, then rebuild the table so the plaintext column and its
         # UNIQUE constraint cannot survive the migration.
         legacy_column_present = "subscription_token" in user_columns
-        select_columns = "user_id,subscription_token_hash"
+        select_columns = "user_id,subscription_token_hash,subscription_token_legacy_hash"
         if legacy_column_present:
             select_columns += ",subscription_token"
         rows = db.execute(f"SELECT {select_columns} FROM users").fetchall()
@@ -421,10 +424,10 @@ class ControlPlane:
                 db.execute(
                     """INSERT INTO users_hash_only(
                            user_id,display_name,plan,role,status,portal_token_hash,
-                           subscription_token_hash,created_at
+                           subscription_token_hash,subscription_token_legacy_hash,created_at
                        )
                        SELECT user_id,display_name,plan,role,status,portal_token_hash,
-                              subscription_token_hash,created_at
+                              subscription_token_hash,subscription_token_legacy_hash,created_at
                        FROM users"""
                 )
                 db.execute("DROP TABLE users")
@@ -442,11 +445,14 @@ class ControlPlane:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             db.execute("VACUUM")
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        else:
-            db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_subscription_token_hash "
-                "ON users(subscription_token_hash)"
-            )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_subscription_token_hash "
+            "ON users(subscription_token_hash)"
+        )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_subscription_token_legacy_hash "
+            "ON users(subscription_token_legacy_hash)"
+        )
 
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -596,8 +602,9 @@ class ControlPlane:
         with self.connect() as db:
             row = db.execute(
                 """SELECT * FROM users
-                   WHERE status='active' AND subscription_token_hash=?""",
-                (token_hash(token),),
+                   WHERE status='active'
+                     AND (subscription_token_hash=? OR subscription_token_legacy_hash=?)""",
+                (token_hash(token), token_hash(token)),
             ).fetchone()
         if row is None:
             raise Unauthorized("invalid or revoked subscription token")
@@ -617,8 +624,8 @@ class ControlPlane:
             db.execute(
                 """INSERT INTO users(
                        user_id,display_name,plan,role,status,portal_token_hash,
-                       subscription_token_hash,created_at
-                   ) VALUES (?,?,?,?,'active',?,?,?)""",
+                       subscription_token_hash,subscription_token_legacy_hash,created_at
+                   ) VALUES (?,?,?,?,'active',?,?,NULL,?)""",
                 (uid, display_name, plan, role, token_hash(token), token_hash(sub_token), now),
             )
         return {"user_id": uid, "portal_token": token, "subscription_token": sub_token}
@@ -638,8 +645,8 @@ class ControlPlane:
                 db.execute(
                     """INSERT INTO users(
                            user_id,display_name,plan,role,status,portal_token_hash,
-                           subscription_token_hash,created_at
-                       ) VALUES (?,?,?,?,'active',?,?,?)""",
+                           subscription_token_hash,subscription_token_legacy_hash,created_at
+                       ) VALUES (?,?,?,?,'active',?,?,NULL,?)""",
                     (user_id, display_name, plan, role, token_hash(token), token_hash(sub_token), utc_now()),
                 )
                 return {"user_id": user_id, "portal_token": token,
@@ -659,31 +666,60 @@ class ControlPlane:
         """Issue one or both user tokens and return plaintext exactly once.
 
         The returned values are for the caller's protected delivery path only.
-        The database receives hashes, and replacing a hash immediately revokes
-        the previous token for that kind. Keeping old tokens active is not
-        supported by this minimal one-active-token-per-kind workflow.
+        The database receives hashes. Portal issuance always replaces and
+        immediately revokes the previous Portal token. Subscription issuance
+        may explicitly retain one previous Subscription hash during a staged
+        migration; that retained hash is never returned to the caller.
         """
         if token_kind not in {"portal", "subscription", "both"}:
             raise ControlPlaneError("invalid token kind")
-        if revoke_old is not True:
-            raise Conflict("token issuance must revoke the previous token")
+        if not isinstance(revoke_old, bool):
+            raise ControlPlaneError("revoke_old must be boolean")
+        if revoke_old is not True and token_kind == "portal":
+            raise Conflict("portal token issuance must revoke the previous token")
         kinds = ("portal", "subscription") if token_kind == "both" else (token_kind,)
-        columns = {"portal": "portal_token_hash", "subscription": "subscription_token_hash"}
         issued = {kind: new_token() for kind in kinds}
         with self.connect() as db:
             user = db.execute(
-                "SELECT user_id,display_name,plan,role,status FROM users WHERE user_id=?",
+                """SELECT user_id,display_name,plan,role,status,
+                          subscription_token_hash,subscription_token_legacy_hash
+                   FROM users WHERE user_id=?""",
                 (user_id,),
             ).fetchone()
             if user is None:
                 raise NotFound("user not found")
             if user["status"] != "active":
                 raise Conflict("user is not active")
-            for kind, token in issued.items():
-                db.execute(
-                    f"UPDATE users SET {columns[kind]}=? WHERE user_id=?",
-                    (token_hash(token), user_id),
-                )
+            retaining_subscription = not revoke_old and "subscription" in kinds
+            if retaining_subscription and user["subscription_token_legacy_hash"]:
+                raise Conflict("a legacy Subscription hash is already retained")
+            assignments = []
+            parameters: list[object] = []
+            if "portal" in issued:
+                assignments.append("portal_token_hash=?")
+                parameters.append(token_hash(issued["portal"]))
+            if "subscription" in issued:
+                if retaining_subscription:
+                    assignments.extend([
+                        "subscription_token_legacy_hash=?",
+                        "subscription_token_hash=?",
+                    ])
+                    parameters.extend([
+                        user["subscription_token_hash"],
+                        token_hash(issued["subscription"]),
+                    ])
+                else:
+                    assignments.extend([
+                        "subscription_token_hash=?",
+                        "subscription_token_legacy_hash=NULL",
+                    ])
+                    parameters.append(token_hash(issued["subscription"]))
+            db.execute(
+                f"UPDATE users SET {', '.join(assignments)} WHERE user_id=?",
+                (*parameters, user_id),
+            )
+        retained_kinds = ["subscription"] if retaining_subscription else []
+        revoked_kinds = [kind for kind in kinds if kind not in retained_kinds]
         return {
             "ok": True,
             "user_id": user["user_id"],
@@ -692,17 +728,67 @@ class ControlPlane:
             "role": user["role"],
             "token_kind": token_kind,
             "issued_at": utc_now(),
-            "revoked_previous": True,
+            "revoked_previous": not retained_kinds,
+            "revoked_previous_kinds": revoked_kinds,
+            "retained_previous_kinds": retained_kinds,
             "tokens": issued,
         }
+
+    def revoke_legacy_subscription(self, user_id: str) -> dict:
+        """Explicitly revoke the one retained legacy Subscription hash."""
+        with self.connect() as db:
+            user = db.execute(
+                "SELECT user_id,subscription_token_legacy_hash FROM users WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if user is None:
+                raise NotFound("user not found")
+            if not user["subscription_token_legacy_hash"]:
+                raise Conflict("no retained legacy Subscription hash")
+            db.execute(
+                "UPDATE users SET subscription_token_legacy_hash=NULL WHERE user_id=?",
+                (user_id,),
+            )
+        return {"ok": True, "user_id": user_id, "revoked": "subscription_legacy"}
 
     def admin_users(self) -> list[dict]:
         """Return non-secret user metadata for the Admin operator."""
         with self.connect() as db:
             rows = db.execute(
-                "SELECT user_id,display_name,plan,role,status FROM users ORDER BY user_id"
+                """SELECT user_id,display_name,plan,role,status,
+                          subscription_token_legacy_hash
+                   FROM users ORDER BY user_id"""
             ).fetchall()
-        return [dict(row) for row in rows]
+            result = []
+            for row in rows:
+                entries = db.execute(
+                    """SELECT pool_id,protocol FROM subscription_entries
+                       WHERE user_id=? AND enabled=1 AND projection_status='current'
+                       ORDER BY entry_id""",
+                    (row["user_id"],),
+                ).fetchall()
+                projected = [entry for entry in entries if entry["protocol"].lower() != "anytls"]
+                pool_ids = []
+                for pool_id in POOL_NAMES:
+                    if any(entry["pool_id"] == pool_id for entry in projected):
+                        pool_ids.append(pool_id)
+                pool_ids.extend(sorted({entry["pool_id"] for entry in projected if entry["pool_id"] not in pool_ids}))
+                result.append({
+                    "user_id": row["user_id"],
+                    "display_name": row["display_name"],
+                    "plan": row["plan"],
+                    "role": row["role"],
+                    "status": row["status"],
+                    "subscription_status": "available" if projected else "not_configured",
+                    "subscription_entry_count": len(projected),
+                    "subscription_pool_ids": pool_ids,
+                    "subscription_protocols": sorted({entry["protocol"].lower() for entry in projected}),
+                    "subscription_anytls_count": sum(
+                        1 for entry in entries if entry["protocol"].lower() == "anytls"
+                    ),
+                    "subscription_legacy_retained": bool(row["subscription_token_legacy_hash"]),
+                })
+        return result
 
     def create_cycle(self, user_id: str, cycle_key: str, starts_at: str | None, ends_at: str | None,
                      cycle_kind: str = "manual", cycle_timezone: str = CUSTOMER_CYCLE_TIMEZONE,
@@ -1505,6 +1591,13 @@ class App:
                     body.get("revoke_old", True),
                 )
                 return self._reply(start_response, 201, json_bytes(value))
+            if path == "/api/admin/token-revoke" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                if body.get("token_kind") != "subscription_legacy":
+                    raise ControlPlaneError("only legacy Subscription hash revocation is supported")
+                value = self.control.revoke_legacy_subscription(str(body["user_id"]))
+                return self._reply(start_response, 200, json_bytes(value))
             if path == "/api/admin/coverage" and method == "POST":
                 self.control._require_admin(self._bearer(environ))
                 body = self._read_json(environ)

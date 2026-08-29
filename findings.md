@@ -112,5 +112,14 @@
 - Control Plane live migration 已完成：`users.subscription_token` legacy plaintext 列已移除，当前只保留 `portal_token_hash` 与 `subscription_token_hash`；foreign-key、health、业务计数和无 WAL/SHM 残留检查通过。
 - `deploy/issue_user_tokens.py` 已提供 Admin metadata list、Portal/Subscription/both issuance、立即 revoke、protected ignored bundle、显式 clipboard helper、bundle verification 和 owner acceptance verification；stdout 不含 token values。
 - root `usr_plus_manual_01` 当前为 `root` / `Plus` / `OWNER`；新的 Portal bundle 已通过真实 Portal UI 与安全 `/api/me` acceptance，当前 Subscription URL 未 rotate 且迁移后仍可用。
-- wrong Portal、old Portal、Portal-as-Subscription、wrong Subscription、Subscription-as-Portal 均在 live path 被拒绝。六个 User 的 metadata list 已验证，其他五个 User 没有被自动 rotate。
+- wrong Portal、old Portal、Portal-as-Subscription、wrong Subscription、Subscription-as-Portal 均在 live path 被拒绝。六个 User 的 metadata list 已验证；首轮 root issuance 未 rotate 其它 User，后续 reconcile 仅为五个无可信 bundle 的 User issue 新 credential。
 - 迁移前 legacy DB rollback copies 已在 acceptance 后清理；保留的 post-migration DB snapshot 为 hash-only。下一阶段可恢复原 Bug Hunt，但任何新 credential issuance 仍必须走该 operator workflow。
+
+## Production Operations Six-user Delivery Reconciliation — resolved
+
+- Product Owner priority override 保持 Bug Hunt 暂停。live Admin metadata 固定为 root/Hegin/abing Plus、dangbin Basic、liuwen/zhanhao Free；只有这些六个 username 被 reconcile。
+- root 可信 bundle 被 re-home 到 `runtime/delivery/root/delivery.json`，未 rotate；其它五个因数据库仅剩 hash 而 issue 新 Portal + Subscription。Portal 旧 hash 即时失效；Subscription 新 hash 生效，旧 hash 保留在 hash-only grace slot，未无条件撤销 shared/legacy path。
+- 六个 bundle 均包含 username、Plan、Portal URL/token、当前 Subscription URL/status、issue/rotation timestamp 与 migration status；OWNER index 只含非 secret 状态字段。
+- 每个新 Subscription URL 已通过公网 `sub.enrpiglink.top` 实际 fetch：Plus 为 6 条 vless、STANDARD+PREMIUM；Basic 为 2 条 vless、STANDARD；Free 为当前 entitlement 对应的 `not_configured`；AnyTLS 未出现在 projection。
+- `copy --user <username> --kind portal|subscription` 只读取该 username 的受保护本地 bundle，显式写入本机 clipboard，不读取数据库/SSH，不输出聊天；六个 Portal self-scope、30 个跨用户 query self-scope、6 个 cross-kind rejection 通过。
+- 本机六个 bundle 与 OWNER index 全部位于 ignored `runtime/delivery`，ACL 仅当前 operator，tracked 文件无 token 命中；后续如需切换旧 Subscription，必须在 acceptance 后显式 `revoke-legacy`。

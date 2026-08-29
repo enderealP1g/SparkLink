@@ -3,14 +3,16 @@
 
 This operator tool is intentionally separate from the Control Plane process.
 It reads the existing Windows DPAPI-protected Admin secret, calls the Admin
-issuance endpoint through an SSH tunnel, and writes only the newly issued
-plaintext to a Windows ACL-protected, Git-ignored delivery directory. It never
-prints token values, response bodies, exception details, or subscription data.
+issuance endpoint through an SSH tunnel, and writes credential plaintext only
+to a Windows ACL-protected, Git-ignored delivery directory. It never prints
+token values, response bodies, exception details, or subscription data.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import datetime as dt
 import getpass
@@ -37,7 +39,15 @@ DEFAULT_PORTAL_URL = "https://spark.enrpiglink.top"
 DEFAULT_SUBSCRIPTION_BASE_URL = "https://sub.enrpiglink.top"
 DEFAULT_SSH_HOST = "sparklink-node-166"
 DEFAULT_FORWARD_PORT = 18081
+DEFAULT_BUNDLE_FILENAME = "delivery.json"
+DEFAULT_INDEX_FILENAME = "OWNER-DELIVERY-INDEX.json"
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+EXPECTED_USERNAMES = {"root", "Hegin", "abing", "dangbin", "liuwen", "zhanhao"}
+PLAN_POOL_IDS = {
+    "Plus": {"STANDARD", "PREMIUM"},
+    "Basic": {"STANDARD"},
+    "Free": set(),
+}
 
 sys.path.insert(0, str(ROOT))
 from src.sparklink_xray_collector import CollectorError, read_dpapi_token  # noqa: E402
@@ -49,6 +59,16 @@ class OperatorError(RuntimeError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never place a credential-bearing URL into a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+NO_REDIRECT_OPENER = urllib.request.build_opener(NoRedirect)
 
 
 def utc_stamp() -> str:
@@ -102,14 +122,37 @@ def _set_private_acl(path: Path, directory: bool) -> None:
             raise OperatorError("delivery_permissions_failed") from exc
         return
     grant = f"{operator_account()}:" + ("(OI)(CI)F" if directory else "F")
+    private_sids = (
+        "*S-1-3-0",    # CREATOR OWNER
+        "*S-1-3-4",    # OWNER RIGHTS
+        "*S-1-5-18",   # LOCAL SYSTEM
+        "*S-1-5-32-544",  # BUILTIN\Administrators
+        "*S-1-5-32-545",  # BUILTIN\Users
+        "*S-1-5-11",   # Authenticated Users
+        "*S-1-1-0",    # Everyone
+    )
+    commands = [
+        ["icacls.exe", str(path), "/inheritance:r"],
+        ["icacls.exe", str(path), "/remove:g", *private_sids],
+        ["icacls.exe", str(path), "/grant:r", grant],
+    ]
     result = subprocess.run(
-        ["icacls.exe", str(path), "/inheritance:r", "/grant:r", grant],
+        commands[0],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
     if result.returncode != 0:
         raise OperatorError("delivery_acl_failed")
+    for command in commands[1:]:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise OperatorError("delivery_acl_failed")
 
 
 def ensure_delivery_directory(path: Path) -> Path:
@@ -127,6 +170,12 @@ def delivery_path(path: Path, delivery_dir: Path) -> Path:
     if candidate != root and root not in candidate.parents:
         raise OperatorError("delivery_path_outside_runtime")
     return candidate
+
+
+def user_bundle_path(username: str, delivery_dir: Path) -> Path:
+    if not USER_ID_RE.fullmatch(username):
+        raise OperatorError("username_invalid")
+    return delivery_path(delivery_dir / username / DEFAULT_BUNDLE_FILENAME, delivery_dir)
 
 
 def write_delivery_bundle(path: Path, value: dict, apply_acl: bool = True) -> Path:
@@ -174,6 +223,31 @@ def read_bundle(path: Path) -> dict:
     if not isinstance(value, dict) or value.get("schema") != "sparklink.operator-delivery.v1":
         raise OperatorError("delivery_bundle_invalid")
     return value
+
+
+def find_existing_bundle(delivery_dir: Path, user_id: str, username: str) -> tuple[Path, dict] | None:
+    """Find only a deterministic per-user bundle or a legacy top-level bundle."""
+    stable = user_bundle_path(username, delivery_dir)
+    if stable.is_file():
+        value = read_bundle(stable)
+        if value.get("user_id") != user_id:
+            raise OperatorError("delivery_bundle_user_mismatch")
+        return stable, value
+    if not delivery_dir.exists():
+        return None
+    candidates = sorted(
+        (path for path in delivery_dir.glob("*.json") if path.name != DEFAULT_INDEX_FILENAME),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            value = read_bundle(path)
+        except OperatorError:
+            continue
+        if value.get("user_id") == user_id:
+            return path.resolve(), value
+    return None
 
 
 def preserved_subscription_url(path: Path, user_id: str) -> str:
@@ -279,6 +353,22 @@ def _request(
     body: dict | None = None,
     read_body: bool = True,
 ) -> tuple[int, bytes]:
+    return _request_url(
+        endpoint.rstrip("/") + path,
+        method=method,
+        headers=headers,
+        body=body,
+        read_body=read_body,
+    )
+
+
+def _request_url(
+    url: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: dict | None = None,
+    read_body: bool = True,
+) -> tuple[int, bytes]:
     request_headers = {"Cache-Control": "no-store"}
     if headers:
         request_headers.update(headers)
@@ -286,11 +376,9 @@ def _request(
     if body is not None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         request_headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(
-        endpoint.rstrip("/") + path, data=data, headers=request_headers, method=method
-    )
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with NO_REDIRECT_OPENER.open(request, timeout=30) as response:
             return int(response.status), response.read(1_000_000) if read_body else b""
     except urllib.error.HTTPError as exc:
         return int(exc.code), b""
@@ -327,13 +415,68 @@ def admin_json(endpoint: str, admin_token: str, path: str, method: str, body: di
     return value
 
 
-def issue_request(endpoint: str, admin_token: str, user_id: str, token_kind: str) -> dict:
+def read_admin_users(endpoint: str, admin_token: str) -> list[dict]:
+    value = admin_json(endpoint, admin_token, "/api/admin/users", "GET")
+    users = value.get("users")
+    if not isinstance(users, list):
+        raise OperatorError("admin_users_response_invalid")
+    result = []
+    for user in users:
+        if not isinstance(user, dict):
+            raise OperatorError("admin_users_response_invalid")
+        required = ("user_id", "display_name", "plan", "role", "status", "subscription_status")
+        if any(not isinstance(user.get(key), str) for key in required):
+            raise OperatorError("admin_users_response_invalid")
+        if not USER_ID_RE.fullmatch(user["user_id"]) or not USER_ID_RE.fullmatch(user["display_name"]):
+            raise OperatorError("admin_users_response_invalid")
+        if user["plan"] not in PLAN_POOL_IDS or user["status"] != "active":
+            raise OperatorError("admin_users_response_invalid")
+        if user["subscription_status"] not in {"available", "not_configured"}:
+            raise OperatorError("admin_users_response_invalid")
+        entry_count = user.get("subscription_entry_count")
+        pool_ids = user.get("subscription_pool_ids")
+        protocols = user.get("subscription_protocols")
+        anytls_count = user.get("subscription_anytls_count")
+        legacy_retained = user.get("subscription_legacy_retained")
+        if (type(entry_count) is not int or entry_count < 0
+                or not isinstance(pool_ids, list) or not all(isinstance(item, str) for item in pool_ids)
+                or not isinstance(protocols, list) or not all(isinstance(item, str) for item in protocols)
+                or type(anytls_count) is not int or anytls_count < 0
+                or type(legacy_retained) is not bool):
+            raise OperatorError("admin_users_response_invalid")
+        if ((user["subscription_status"] == "available" and entry_count == 0)
+                or (user["subscription_status"] == "not_configured" and entry_count != 0)
+                or (user["subscription_status"] == "not_configured" and pool_ids)):
+            raise OperatorError("admin_users_response_invalid")
+        result.append({
+            "user_id": user["user_id"],
+            "display_name": user["display_name"],
+            "plan": user["plan"],
+            "role": user["role"],
+            "status": user["status"],
+            "subscription_status": user["subscription_status"],
+            "subscription_entry_count": entry_count,
+            "subscription_pool_ids": pool_ids,
+            "subscription_protocols": protocols,
+            "subscription_anytls_count": anytls_count,
+            "subscription_legacy_retained": legacy_retained,
+        })
+    return result
+
+
+def issue_request(
+    endpoint: str,
+    admin_token: str,
+    user_id: str,
+    token_kind: str,
+    revoke_old: bool = True,
+) -> dict:
     value = admin_json(
         endpoint,
         admin_token,
         "/api/admin/token-issuance",
         "POST",
-        {"user_id": user_id, "token_kind": token_kind, "revoke_old": True},
+        {"user_id": user_id, "token_kind": token_kind, "revoke_old": revoke_old},
     )
     tokens = value.get("tokens")
     if not isinstance(tokens, dict):
@@ -341,8 +484,19 @@ def issue_request(endpoint: str, admin_token: str, user_id: str, token_kind: str
     expected = {"portal", "subscription"} if token_kind == "both" else {token_kind}
     if set(tokens) != expected or any(not isinstance(tokens[k], str) or not tokens[k] for k in expected):
         raise OperatorError("issuance_response_invalid")
-    if value.get("user_id") != user_id or value.get("revoked_previous") is not True:
+    if value.get("user_id") != user_id:
         raise OperatorError("issuance_response_metadata_invalid")
+    retained = value.get("retained_previous_kinds")
+    revoked = value.get("revoked_previous_kinds")
+    if not isinstance(retained, list) or not isinstance(revoked, list):
+        raise OperatorError("issuance_response_metadata_invalid")
+    if revoke_old:
+        if value.get("revoked_previous") is not True or retained or set(revoked) != set(expected):
+            raise OperatorError("issuance_response_metadata_invalid")
+    elif token_kind not in {"subscription", "both"}:
+        raise OperatorError("retain_old_not_supported_for_kind")
+    elif value.get("revoked_previous") is not False or set(retained) != {"subscription"}:
+        raise OperatorError("issuance_response_retention_invalid")
     return value
 
 
@@ -356,6 +510,61 @@ def verify_portal(endpoint: str, token: str, user_id: str) -> None:
         raise OperatorError("verify_portal_response_invalid") from exc
     if not isinstance(value, dict) or value.get("user_id") != user_id:
         raise OperatorError("verify_portal_identity_failed")
+
+
+def verify_public_subscription_projection(
+    subscription_url_value: str,
+    plan: str,
+    expected_status: str,
+    expected_entry_count: int,
+    expected_pool_ids: list[str],
+    expected_protocols: list[str],
+    public_subscription_base_url: str = DEFAULT_SUBSCRIPTION_BASE_URL,
+) -> dict:
+    public_base = validate_url(public_subscription_base_url)
+    parsed_url = urllib.parse.urlsplit(subscription_url_value)
+    parsed_base = urllib.parse.urlsplit(public_base)
+    if (parsed_url.scheme, parsed_url.netloc) != (parsed_base.scheme, parsed_base.netloc):
+        raise OperatorError("subscription_url_not_public_endpoint")
+    subscription_token_from_url(subscription_url_value)
+    expected_pools = PLAN_POOL_IDS.get(plan)
+    if expected_pools is None or set(expected_pool_ids) != expected_pools:
+        raise OperatorError("subscription_entitlement_mismatch")
+    status, raw = _request_url(
+        subscription_url_value,
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "*/*"},
+    )
+    if expected_status == "not_configured":
+        if status != 503 or expected_entry_count != 0:
+            raise OperatorError("subscription_not_configured_verification_failed")
+        return {
+            "http_status": status,
+            "projection_status": "not_configured",
+            "projection_entries": 0,
+            "anytls": False,
+        }
+    if expected_status != "available" or status != 200:
+        raise OperatorError("subscription_public_fetch_failed")
+    try:
+        decoded = base64.b64decode(raw.strip(), validate=True).decode("utf-8") if raw.strip() else ""
+    except (binascii.Error, UnicodeError) as exc:
+        raise OperatorError("subscription_projection_invalid") from exc
+    lines = [line for line in decoded.splitlines() if line]
+    if len(lines) != expected_entry_count:
+        raise OperatorError("subscription_projection_count_mismatch")
+    if any("anytls" in line.lower() for line in lines):
+        raise OperatorError("subscription_projection_anytls_present")
+    schemes = {urllib.parse.urlsplit(line).scheme.lower() for line in lines}
+    if schemes != {protocol.lower() for protocol in expected_protocols}:
+        raise OperatorError("subscription_projection_protocol_mismatch")
+    return {
+        "http_status": status,
+        "projection_status": "available",
+        "projection_entries": len(lines),
+        "pool_ids": list(expected_pool_ids),
+        "protocols": sorted(schemes),
+        "anytls": False,
+    }
 
 
 def verify_portal_view(
@@ -414,6 +623,7 @@ def verify_issued_tokens(
     user_id: str,
     tokens: dict[str, str],
     old_tokens: dict[str, str] | None = None,
+    subscription_expected_status: int = 200,
 ) -> list[str]:
     checks: list[str] = []
     if "portal" in tokens:
@@ -440,10 +650,14 @@ def verify_issued_tokens(
             endpoint,
             "/subscription",
             {"X-SparkLink-Subscription-Token": tokens["subscription"]},
-            200,
+            subscription_expected_status,
             "verify_new_subscription_failed",
         )
-        checks.append("new_subscription=accepted")
+        checks.append(
+            "new_subscription=accepted"
+            if subscription_expected_status == 200
+            else "new_subscription=authenticated_no_projection"
+        )
         verify_status(
             endpoint,
             "/subscription",
@@ -494,12 +708,15 @@ def bundle_from_issuance(
         "schema": "sparklink.operator-delivery.v1",
         "generated_at": str(response["issued_at"]),
         "user_id": str(response["user_id"]),
+        "username": str(response.get("display_name", "")),
         "display_name": str(response.get("display_name", "")),
         "plan": str(response.get("plan", "")),
         "role": str(response.get("role", "")),
         "portal_url": validate_url(portal_url),
         "token_kind": token_kind,
-        "revoked_previous": True,
+        "issue_rotation_timestamp": str(response["issued_at"]),
+        "revoked_previous": response.get("revoked_previous") is True,
+        "retained_previous_kinds": list(response.get("retained_previous_kinds", [])),
     }
     if "portal" in tokens:
         value["portal_access_token"] = tokens["portal"]
@@ -508,6 +725,170 @@ def bundle_from_issuance(
     elif preserved_url:
         value["subscription_url"] = preserved_url
     return value, tokens
+
+
+def user_delivery_bundle(
+    user: dict,
+    portal_token: str,
+    subscription_url_value: str,
+    portal_url: str,
+    issue_timestamp: str,
+    migration_status: str,
+) -> dict:
+    if not isinstance(portal_token, str) or not portal_token:
+        raise OperatorError("portal_token_missing")
+    if not isinstance(subscription_url_value, str):
+        raise OperatorError("subscription_url_missing")
+    subscription_token_from_url(subscription_url_value)
+    if not isinstance(issue_timestamp, str) or not issue_timestamp:
+        raise OperatorError("issue_timestamp_missing")
+    return {
+        "schema": "sparklink.operator-delivery.v1",
+        "generated_at": utc_stamp(),
+        "user_id": user["user_id"],
+        "username": user["display_name"],
+        "display_name": user["display_name"],
+        "plan": user["plan"],
+        "role": user["role"],
+        "status": user["status"],
+        "portal_url": validate_url(portal_url),
+        "portal_access_token": portal_token,
+        "subscription_url": subscription_url_value,
+        "subscription_status": user["subscription_status"],
+        "subscription_entry_count": user["subscription_entry_count"],
+        "subscription_pool_ids": list(user["subscription_pool_ids"]),
+        "subscription_protocols": list(user["subscription_protocols"]),
+        "issue_rotation_timestamp": issue_timestamp,
+        "migration_status": migration_status,
+    }
+
+
+def validate_reconciliation_scope(users: list[dict]) -> None:
+    if len(users) != len(EXPECTED_USERNAMES) or {user["display_name"] for user in users} != EXPECTED_USERNAMES:
+        raise OperatorError("six_user_scope_mismatch")
+    for user in users:
+        expected_pools = PLAN_POOL_IDS[user["plan"]]
+        actual_pools = user["subscription_pool_ids"]
+        if set(actual_pools) != expected_pools or len(actual_pools) != len(set(actual_pools)):
+            raise OperatorError("subscription_entitlement_mismatch")
+        if any(protocol.lower() == "anytls" for protocol in user["subscription_protocols"]):
+            raise OperatorError("subscription_anytls_configured")
+        if user["subscription_anytls_count"] < 0:
+            raise OperatorError("subscription_metadata_invalid")
+
+
+def owner_index_value(rows: list[dict]) -> dict:
+    return {
+        "schema": "sparklink.owner-delivery-index.v1",
+        "generated_at": utc_stamp(),
+        "users": [
+            {
+                "user": row["user"],
+                "plan": row["plan"],
+                "bundle_path": row["bundle_path"],
+                "portal_token_status": row["portal_token_status"],
+                "subscription_status": row["subscription_status"],
+                "migration_status": row["migration_status"],
+            }
+            for row in rows
+        ],
+    }
+
+
+def reconcile(args: argparse.Namespace) -> int:
+    delivery_dir = Path(args.delivery_dir)
+    public_subscription_base_url = validate_url(args.public_subscription_base_url)
+    admin_token = _admin_token(Path(args.secret_path))
+    index_rows = []
+    with selected_endpoint(args) as endpoint:
+        users = read_admin_users(endpoint, admin_token)
+        validate_reconciliation_scope(users)
+        for user in sorted(users, key=lambda item: item["user_id"]):
+            username = user["display_name"]
+            output = user_bundle_path(username, delivery_dir)
+            existing = find_existing_bundle(delivery_dir, user["user_id"], username)
+            if existing:
+                source, old_bundle = existing
+                portal = old_bundle.get("portal_access_token") or old_bundle.get("portal_token")
+                subscription = old_bundle.get("subscription_url")
+                if not isinstance(portal, str) or not isinstance(subscription, str):
+                    raise OperatorError("existing_bundle_incomplete")
+                verify_portal(endpoint, portal, user["user_id"])
+                verify_public_subscription_projection(
+                    subscription,
+                    user["plan"],
+                    user["subscription_status"],
+                    user["subscription_entry_count"],
+                    user["subscription_pool_ids"],
+                    user["subscription_protocols"],
+                    public_subscription_base_url,
+                )
+                verify_issued_tokens(
+                    endpoint,
+                    user["user_id"],
+                    {"portal": portal, "subscription": subscription_token_from_url(subscription)},
+                    subscription_expected_status=(200 if user["subscription_status"] == "available" else 503),
+                )
+                issue_timestamp = old_bundle.get("issue_rotation_timestamp") or old_bundle.get("generated_at")
+                if not isinstance(issue_timestamp, str) or not issue_timestamp:
+                    issue_timestamp = utc_stamp()
+                value = user_delivery_bundle(
+                    user, portal, subscription, args.portal_url, issue_timestamp,
+                    "reused_trusted_bundle",
+                )
+                write_delivery_bundle(output, value)
+                if source.resolve() != output.resolve() and source.parent.resolve() == delivery_dir.resolve():
+                    try:
+                        source.unlink()
+                    except OSError as exc:
+                        raise OperatorError("legacy_bundle_cleanup_failed") from exc
+                migration_status = "reused_trusted_bundle"
+            else:
+                response = issue_request(endpoint, admin_token, user["user_id"], "both", revoke_old=False)
+                tokens = response["tokens"]
+                subscription = subscription_url(public_subscription_base_url, tokens["subscription"])
+                migration_status = "new_per_user_tokens_legacy_subscription_retained"
+                if user["subscription_anytls_count"]:
+                    migration_status += "_deferred_anytls_excluded"
+                value = user_delivery_bundle(
+                    user, tokens["portal"], subscription, args.portal_url,
+                    str(response["issued_at"]), migration_status,
+                )
+                # Persist the protected handoff before remote/public checks so a
+                # transient verification failure never loses the new plaintext.
+                write_delivery_bundle(output, value)
+                verify_issued_tokens(
+                    endpoint,
+                    user["user_id"],
+                    tokens,
+                    subscription_expected_status=(200 if user["subscription_status"] == "available" else 503),
+                )
+                verify_public_subscription_projection(
+                    subscription,
+                    user["plan"],
+                    user["subscription_status"],
+                    user["subscription_entry_count"],
+                    user["subscription_pool_ids"],
+                    user["subscription_protocols"],
+                    public_subscription_base_url,
+                )
+            index_rows.append({
+                "user": username,
+                "plan": user["plan"],
+                "bundle_path": str(output),
+                "portal_token_status": "verified",
+                "subscription_status": user["subscription_status"],
+                "migration_status": migration_status,
+            })
+    index_path = delivery_path(delivery_dir / DEFAULT_INDEX_FILENAME, delivery_dir)
+    write_delivery_bundle(index_path, owner_index_value(index_rows))
+    print(json.dumps({
+        "ok": True,
+        "delivery_index": str(index_path),
+        "users": index_rows,
+        "plaintext_not_printed": True,
+    }, ensure_ascii=False, separators=(",", ":")))
+    return 0
 
 
 def legacy_export(args: argparse.Namespace) -> int:
@@ -574,13 +955,18 @@ def issue(args: argparse.Namespace) -> int:
     output = delivery_path(output, delivery_dir)
     old_tokens = None
     if args.old_bundle:
+        if args.retain_old_subscription:
+            raise OperatorError("old_bundle_rejection_incompatible_with_retention")
         old_tokens = old_tokens_from_bundle(Path(args.old_bundle), args.token_kind, user_id)
     preserved_url = None
     if args.preserve_subscription_bundle:
         preserved_url = preserved_subscription_url(Path(args.preserve_subscription_bundle), user_id)
     admin_token = _admin_token(Path(args.secret_path))
     with selected_endpoint(args) as endpoint:
-        response = issue_request(endpoint, admin_token, user_id, args.token_kind)
+        response = issue_request(
+            endpoint, admin_token, user_id, args.token_kind,
+            revoke_old=not args.retain_old_subscription,
+        )
         value, tokens = bundle_from_issuance(
             response, args.token_kind, args.portal_url, preserved_url, args.subscription_base_url
         )
@@ -629,8 +1015,26 @@ def verify(args: argparse.Namespace) -> int:
         tokens["subscription"] = subscription_token_from_url(url)
     if not tokens:
         raise OperatorError("bundle_has_no_verifiable_token")
+    subscription_status = value.get("subscription_status")
+    expected_subscription_status = 503 if subscription_status == "not_configured" else 200
     with selected_endpoint(args) as endpoint:
-        checks = verify_issued_tokens(endpoint, user_id, tokens)
+        checks = verify_issued_tokens(
+            endpoint, user_id, tokens,
+            subscription_expected_status=expected_subscription_status,
+        )
+    if "subscription" in tokens and subscription_status in {"available", "not_configured"}:
+        entry_count = value.get("subscription_entry_count")
+        pool_ids = value.get("subscription_pool_ids")
+        protocols = value.get("subscription_protocols")
+        plan = value.get("plan")
+        if (not isinstance(plan, str) or type(entry_count) is not int
+                or not isinstance(pool_ids, list) or not isinstance(protocols, list)):
+            raise OperatorError("bundle_subscription_metadata_invalid")
+        verify_public_subscription_projection(
+            value["subscription_url"], plan, subscription_status, entry_count,
+            pool_ids, protocols, args.public_subscription_base_url,
+        )
+        checks.append("public_subscription=verified")
     print(json.dumps({"ok": True, "user_id": user_id, "verification": checks}, separators=(",", ":")))
     return 0
 
@@ -652,39 +1056,66 @@ def acceptance(args: argparse.Namespace) -> int:
 def list_users(args: argparse.Namespace) -> int:
     admin_token = _admin_token(Path(args.secret_path))
     with selected_endpoint(args) as endpoint:
-        value = admin_json(endpoint, admin_token, "/api/admin/users", "GET")
-    users = value.get("users")
-    if not isinstance(users, list):
-        raise OperatorError("admin_users_response_invalid")
-    safe_users = []
-    for user in users:
-        if not isinstance(user, dict):
-            raise OperatorError("admin_users_response_invalid")
-        safe_users.append({key: user.get(key) for key in ("user_id", "display_name", "plan", "role", "status")})
+        users = read_admin_users(endpoint, admin_token)
+    safe_users = [
+        {
+            "user_id": user["user_id"],
+            "display_name": user["display_name"],
+            "plan": user["plan"],
+            "role": user["role"],
+            "status": user["status"],
+            "subscription_status": user["subscription_status"],
+            "subscription_entry_count": user["subscription_entry_count"],
+            "subscription_legacy_retained": user["subscription_legacy_retained"],
+        }
+        for user in users
+    ]
     print(json.dumps({"ok": True, "users": safe_users}, ensure_ascii=False, separators=(",", ":")))
     return 0
 
 
 def copy_secret(args: argparse.Namespace) -> int:
-    value = read_bundle(Path(args.bundle))
+    delivery_dir = Path(args.delivery_dir)
+    if args.user:
+        bundle_path = user_bundle_path(args.user, delivery_dir)
+    else:
+        bundle_path = delivery_path(Path(args.bundle), delivery_dir)
+    value = read_bundle(bundle_path)
     if args.kind == "portal":
-        token = value.get("portal_access_token") or value.get("portal_token")
-        if not isinstance(token, str) or not token:
+        secret = value.get("portal_access_token") or value.get("portal_token")
+        if not isinstance(secret, str) or not secret:
             raise OperatorError("portal_token_missing")
     else:
-        url = value.get("subscription_url")
-        if not isinstance(url, str):
+        secret = value.get("subscription_url")
+        if not isinstance(secret, str):
             raise OperatorError("subscription_url_missing")
-        token = subscription_token_from_url(url)
+        subscription_token_from_url(secret)
     if os.name != "nt":
         raise OperatorError("clipboard_requires_windows")
     result = subprocess.run(
-        ["clip.exe"], input=token.encode("utf-8"), stdout=subprocess.DEVNULL,
+        ["clip.exe"], input=secret.encode("utf-8"), stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, check=False,
     )
     if result.returncode != 0:
         raise OperatorError("clipboard_copy_failed")
     print(json.dumps({"ok": True, "kind": args.kind, "clipboard": "updated", "secret_not_printed": True}, separators=(",", ":")))
+    return 0
+
+
+def revoke_legacy(args: argparse.Namespace) -> int:
+    user_id = validate_user_id(args.user_id)
+    admin_token = _admin_token(Path(args.secret_path))
+    with selected_endpoint(args) as endpoint:
+        value = admin_json(
+            endpoint,
+            admin_token,
+            "/api/admin/token-revoke",
+            "POST",
+            {"user_id": user_id, "token_kind": "subscription_legacy"},
+        )
+    if value.get("ok") is not True or value.get("user_id") != user_id:
+        raise OperatorError("legacy_revoke_response_invalid")
+    print(json.dumps({"ok": True, "user_id": user_id, "revoked": "subscription_legacy"}, separators=(",", ":")))
     return 0
 
 
@@ -709,11 +1140,27 @@ def build_parser() -> argparse.ArgumentParser:
     issue_parser.add_argument("--preserve-subscription-bundle", type=Path)
     issue_parser.add_argument("--old-bundle", type=Path)
     issue_parser.add_argument("--consume-old-bundle", action="store_true")
+    issue_parser.add_argument(
+        "--retain-old-subscription",
+        action="store_true",
+        help="retain one previous Subscription hash for staged migration (not valid for Portal-only issue)",
+    )
     issue_parser.add_argument("--no-verify", action="store_true")
     add_endpoint_options(issue_parser)
 
+    reconcile_parser = commands.add_parser(
+        "reconcile",
+        help="build protected per-user bundles and an OWNER-only delivery index for the six current Users",
+    )
+    reconcile_parser.add_argument("--secret-path", type=Path, default=DEFAULT_SECRET_PATH)
+    reconcile_parser.add_argument("--delivery-dir", type=Path, default=DEFAULT_DELIVERY_DIR)
+    reconcile_parser.add_argument("--portal-url", default=DEFAULT_PORTAL_URL)
+    reconcile_parser.add_argument("--public-subscription-base-url", default=DEFAULT_SUBSCRIPTION_BASE_URL)
+    add_endpoint_options(reconcile_parser)
+
     verify_parser = commands.add_parser("verify", help="verify a protected delivery bundle")
     verify_parser.add_argument("--bundle", type=Path, required=True)
+    verify_parser.add_argument("--public-subscription-base-url", default=DEFAULT_SUBSCRIPTION_BASE_URL)
     add_endpoint_options(verify_parser)
 
     acceptance_parser = commands.add_parser("acceptance", help="verify a protected Portal owner acceptance")
@@ -728,8 +1175,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_endpoint_options(list_parser)
 
     copy_parser = commands.add_parser("copy", help="explicitly copy one bundle secret to local clipboard")
-    copy_parser.add_argument("--bundle", type=Path, required=True)
+    copy_group = copy_parser.add_mutually_exclusive_group(required=True)
+    copy_group.add_argument("--bundle", type=Path)
+    copy_group.add_argument("--user", help="per-user delivery directory name, for example Hegin")
+    copy_parser.add_argument("--delivery-dir", type=Path, default=DEFAULT_DELIVERY_DIR)
     copy_parser.add_argument("--kind", choices=("portal", "subscription"), required=True)
+
+    revoke_parser = commands.add_parser(
+        "revoke-legacy",
+        help="explicitly revoke a retained legacy Subscription hash after migration acceptance",
+    )
+    revoke_parser.add_argument("--user-id", required=True)
+    revoke_parser.add_argument("--secret-path", type=Path, default=DEFAULT_SECRET_PATH)
+    add_endpoint_options(revoke_parser)
 
     legacy_parser = commands.add_parser(
         "legacy-export",
@@ -748,6 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "issue":
         return issue(args)
+    if args.command == "reconcile":
+        return reconcile(args)
     if args.command == "verify":
         return verify(args)
     if args.command == "acceptance":
@@ -756,6 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
         return list_users(args)
     if args.command == "copy":
         return copy_secret(args)
+    if args.command == "revoke-legacy":
+        return revoke_legacy(args)
     if args.command == "legacy-export":
         return legacy_export(args)
     raise OperatorError("operator_command_invalid")

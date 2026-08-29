@@ -58,3 +58,12 @@
 - root `usr_plus_manual_01` 新 Portal token 已写入 Windows ignored protected delivery bundle；bundle 未进入 Git，ACL 仅当前 operator。真实 Portal acceptance 通过：root / Plus / OWNER / `legacy-pre-baseline` / `Asia/Shanghai` / STANDARD + PREMIUM / `/api/me` self-scope。
 - live rejection verification 通过：本轮 superseded old Portal、wrong Portal、Portal-as-Subscription、wrong Subscription、Subscription-as-Portal 均 rejected；当前 root Subscription URL 未 rotate 且 accepted。
 - Admin list 已确认 6 个 User 可由同一 workflow 指定交付；没有自动 rotate 其它 User。迁移前 plaintext DB rollback copies 已删除，保留 post-migration hash-only snapshot；现在恢复原 Bug Hunt。
+
+## 2026-08-29 — Six-user delivery reconciliation complete
+
+- Product Owner priority override remains active：Bug Hunt paused；本阶段只处理六个现有 User 的可发送 credential delivery closure。
+- Control Plane 增加可选 hash-only `subscription_token_legacy_hash` grace slot。Portal issuance 仍立即 revoke 旧 Portal；staged `both` issuance 只替换 Portal 并保留旧 Subscription hash，支持验收后显式 `revoke-legacy`。
+- live Admin metadata 固定确认六个 User：root/Hegin/abing 为 Plus，dangbin 为 Basic，liuwen/zhanhao 为 Free；projection 为 Plus 6 条 vless（STANDARD/PREMIUM）、Basic 2 条 vless（STANDARD）、Free `not_configured`，AnyTLS 未进入新 projection。
+- `python deploy\\issue_user_tokens.py reconcile` 已完成：root 复用可信 bundle；其余五个 plaintext 已不可恢复的 User 各自 issue 新 Portal + Subscription，并在新 URL 公网 fetch/projection 验证前保留旧 Subscription grace hash。
+- 本机已生成 `runtime/delivery/<username>/delivery.json` 六份和 OWNER-only `OWNER-DELIVERY-INDEX.json`；`copy --user <username> --kind portal|subscription` 为显式 local-only clipboard path，stdout 不输出 secret。
+- 独立验收通过：6 个 Portal self-scope、30 个跨用户 query self-scope、6 个 Subscription-as-Portal rejection；六个 credential pairwise unique；runtime delivery 7 个文件 ACL 仅当前 operator、全部 ignored、无 tracked delivery 或 tracked token 命中。

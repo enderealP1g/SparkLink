@@ -71,11 +71,19 @@
 - [x] T3 — 补齐 old/wrong token rejection、cross-kind separation、DB no-plaintext、ACL/ignored-path regression checks。
 - [x] T4 — 备份并部署 Control Plane；只先 rotate root Portal token，生成 root bundle，独立验证新 token/旧 token和 public path。
 - [x] T5 — 使用新 token 完成 `spark.enrpiglink.top` owner acceptance；随后为六个 User 建立 delivery bundle 机制，不自动 rotate 其他现有 token。
-- [x] T6 — 记录脱敏运行证据，恢复原 Bug Hunt。
+- [x] T6 — 记录脱敏运行证据；原 Bug Hunt 曾可恢复，但当前 Product Owner override 继续保持其暂停。
 
 ### Token safety gates
 
-- Control Plane/SQLite 只保存 `portal_token_hash` 与 `subscription_token_hash`；legacy plaintext 列必须迁移并移除。
-- plaintext 只在 issue/rotate 响应到 operator process memory 与一次性 local delivery bundle 中存在；不进入 Git、日志、operations docs 或聊天。
-- 默认 rotate 立即使旧 token 失效；保留旧 token 只允许显式、受审计的选项。
-- Bundle 仅写入当前 Windows operator 可读的 ignored `runtime/delivery`；写入后验证 ignored、ACL、hash-only DB 和真实 wrong/old rejection。
+- Control Plane/SQLite 只保存 `portal_token_hash`、`subscription_token_hash` 与可选的 hash-only `subscription_token_legacy_hash`；legacy plaintext 列必须迁移并移除。
+- plaintext 只在 issue/rotate 响应、可信 local bundle re-home 或一次性 local delivery bundle 中存在；不进入 Git、日志、operations docs 或聊天。
+- Portal 默认立即 revoke 旧 token；Subscription staged migration 允许显式保留一个旧 hash，验收后可由 `revoke-legacy` 显式清除。
+- Bundle 仅写入当前 Windows operator 可读的 ignored `runtime/delivery/<username>/delivery.json`；OWNER index 不含 secret；写入后验证 ignored、ACL、hash-only DB 和真实 public projection/rejection。
+
+## Six-user delivery reconciliation — Product Owner override
+
+- [x] R0 — 固定 scope 为 `root`、`Hegin`、`abing`、`dangbin`、`liuwen`、`zhanhao`，读取 live Plan/Entitlement/projection metadata。
+- [x] R1 — Trusted runtime bundle 只复用；hash-only User 才 issue；Portal/Subscription 独立，旧 Subscription 以 grace hash 保留。
+- [x] R2 — 写入六个受 ACL 保护的 per-user bundles 与 OWNER-only index，提供 `copy --user <username> --kind portal|subscription`。
+- [x] R3 — 逐 User 验证 local auth、public `sub.enrpiglink.top` projection、Plan pool/count/protocol、Free not-configured 状态和 AnyTLS exclusion。
+- [x] R4 — 完成六用户 self-scope/cross-user rejection、ignored/tracked/ACL/secret scan；Bug Hunt 继续暂停。

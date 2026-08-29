@@ -327,6 +327,7 @@ class ControlPlaneTests(unittest.TestCase):
             db.close()
         self.assertIn("portal_token_hash", columns)
         self.assertIn("subscription_token_hash", columns)
+        self.assertIn("subscription_token_legacy_hash", columns)
         self.assertNotIn("subscription_token", columns)
         self.assertEqual(row[0], token_hash(self.user["portal_token"]))
         self.assertEqual(row[1], token_hash(self.user["subscription_token"]))
@@ -418,6 +419,52 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(status, "201 OK")
         self.assertEqual(set(issued["tokens"]), {"portal"})
         self.assertNotIn("subscription_token", json.dumps(issued))
+
+    def test_subscription_issuance_can_retain_then_explicitly_revoke_previous_hash(self):
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
+        old_subscription = self.user["subscription_token"]
+        result = self.cp.issue_tokens("usr_test", "subscription", revoke_old=False)
+        new_subscription = result["tokens"]["subscription"]
+        self.assertFalse(result["revoked_previous"])
+        self.assertEqual(result["retained_previous_kinds"], ["subscription"])
+        self.assertEqual(result["revoked_previous_kinds"], [])
+        self.assertEqual(self.cp._user_by_subscription_token(old_subscription)["user_id"], "usr_test")
+        self.assertEqual(self.cp._user_by_subscription_token(new_subscription)["user_id"], "usr_test")
+        db = self.cp.connect()
+        try:
+            row = db.execute(
+                "SELECT subscription_token_hash,subscription_token_legacy_hash FROM users WHERE user_id='usr_test'"
+            ).fetchone()
+        finally:
+            db.close()
+        self.assertEqual(row[0], token_hash(new_subscription))
+        self.assertEqual(row[1], token_hash(old_subscription))
+        self.cp.revoke_legacy_subscription("usr_test")
+        with self.assertRaises(Unauthorized):
+            self.cp._user_by_subscription_token(old_subscription)
+        self.assertEqual(self.cp._user_by_subscription_token(new_subscription)["user_id"], "usr_test")
+
+    def test_both_issuance_retains_only_subscription_previous_hash(self):
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
+        old_portal = self.user["portal_token"]
+        old_subscription = self.user["subscription_token"]
+        result = self.cp.issue_tokens("usr_test", "both", revoke_old=False)
+        self.assertEqual(result["revoked_previous_kinds"], ["portal"])
+        self.assertEqual(result["retained_previous_kinds"], ["subscription"])
+        with self.assertRaises(Unauthorized):
+            self.cp.user_view(old_portal)
+        self.assertEqual(self.cp._user_by_subscription_token(old_subscription)["user_id"], "usr_test")
+
+    def test_admin_users_returns_safe_projection_metadata_without_hashes(self):
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
+        user = next(item for item in self.cp.admin_users() if item["user_id"] == "usr_test")
+        self.assertEqual(user["subscription_status"], "available")
+        self.assertEqual(user["subscription_entry_count"], 1)
+        self.assertEqual(user["subscription_pool_ids"], ["PREMIUM"])
+        self.assertEqual(user["subscription_protocols"], ["vless"])
+        self.assertFalse(user["subscription_legacy_retained"])
+        self.assertNotIn("portal_token_hash", user)
+        self.assertNotIn("subscription_token_hash", user)
 
     def test_subscription_and_portal_tokens_cannot_cross_authentication_boundaries(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
