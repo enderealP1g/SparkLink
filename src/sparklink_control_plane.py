@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "web"
 PLAN_ORDER = {"Free": 0, "Basic": 1, "Plus": 2}
 POOL_NAMES = ("STANDARD", "PREMIUM")
+DEFAULT_COVERAGE_MAX_AGE_SECONDS = 900
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -184,7 +185,11 @@ def utc_now() -> str:
 def parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def ref_hash(runtime_ref: str) -> str:
@@ -224,12 +229,22 @@ class ServiceUnavailable(ControlPlaneError):
 
 
 class ControlPlane:
-    def __init__(self, db_path: str | Path, admin_token: str | None = None, subscription_base_url: str | None = None):
+    def __init__(self, db_path: str | Path, admin_token: str | None = None,
+                 subscription_base_url: str | None = None,
+                 coverage_max_age_seconds: int | None = None):
         self.db_path = Path(db_path)
         self.admin_token = admin_token or os.environ.get("SPARKLINK_ADMIN_TOKEN", "")
         self.subscription_base_url = (subscription_base_url or os.environ.get(
             "SPARKLINK_SUBSCRIPTION_BASE_URL", "https://sub.enrpiglink.top"
         )).rstrip("/")
+        configured_age = coverage_max_age_seconds
+        if configured_age is None:
+            configured_age = int(os.environ.get(
+                "SPARKLINK_COVERAGE_MAX_AGE_SECONDS", str(DEFAULT_COVERAGE_MAX_AGE_SECONDS)
+            ))
+        if configured_age <= 0:
+            raise ValueError("coverage_max_age_seconds must be positive")
+        self.coverage_max_age_seconds = configured_age
 
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -367,13 +382,16 @@ class ControlPlane:
     def set_coverage(self, node_id: str, source: str, status: str, detail: str, observed_at: str | None = None) -> str:
         if status not in {"available", "gap", "stale", "unknown"}:
             raise ControlPlaneError("invalid coverage status")
+        sample_time = observed_at or utc_now()
+        if parse_time(sample_time) is None:
+            raise ControlPlaneError("observed_at must be ISO-8601")
         coverage_id = f"cov_{uuid.uuid4().hex}"
         with self.connect() as db:
             if db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
                 raise NotFound("node not found")
             db.execute(
                 "INSERT INTO coverage_events(coverage_id,node_id,source,status,observed_at,detail) VALUES (?,?,?,?,?,?)",
-                (coverage_id, node_id, source, status, observed_at or utc_now(), detail[:500]),
+                (coverage_id, node_id, source, status, sample_time, detail[:500]),
             )
         return coverage_id
 
@@ -402,6 +420,12 @@ class ControlPlane:
         if not observations:
             raise ControlPlaneError("observations must not be empty")
         sample_time = observed_at or utc_now()
+        if not source.strip():
+            raise ControlPlaneError("source must not be empty")
+        if not counter_epoch.strip():
+            raise ControlPlaneError("counter_epoch must not be empty")
+        if parse_time(sample_time) is None:
+            raise ControlPlaneError("observed_at must be ISO-8601")
         inserted = 0
         duplicates = 0
         unresolved = 0
@@ -417,9 +441,39 @@ class ControlPlane:
                 if up < 0 or down < 0:
                     raise ControlPlaneError("counters cannot be negative")
                 item_time = str(item.get("observed_at") or sample_time)
+                if parse_time(item_time) is None:
+                    raise ControlPlaneError("observation observed_at must be ISO-8601")
                 oid = str(item.get("observation_id") or hashlib.sha256(
                     f"{node_id}|{runtime_hash}|{counter_epoch}|{item_time}|{source}".encode()
                 ).hexdigest())
+                existing = db.execute(
+                    """SELECT node_id,runtime_ref_hash,counter_epoch,observed_at,
+                              uplink_bytes,downlink_bytes,source
+                       FROM usage_observations WHERE observation_id=?""",
+                    (oid,),
+                ).fetchone()
+                if existing:
+                    same = (
+                        existing[0] == node_id and existing[1] == runtime_hash
+                        and existing[2] == counter_epoch and existing[3] == item_time
+                        and existing[4] == up and existing[5] == down and existing[6] == source
+                    )
+                    if same:
+                        duplicates += 1
+                        continue
+                    raise Conflict("observation_id conflicts with existing observation")
+                natural = db.execute(
+                    """SELECT observation_id,uplink_bytes,downlink_bytes
+                       FROM usage_observations
+                       WHERE node_id=? AND runtime_ref_hash=? AND counter_epoch=?
+                         AND observed_at=? AND source=?""",
+                    (node_id, runtime_hash, counter_epoch, item_time, source),
+                ).fetchone()
+                if natural:
+                    if natural[1] == up and natural[2] == down:
+                        duplicates += 1
+                        continue
+                    raise Conflict("observation natural key conflicts with existing observation")
                 try:
                     db.execute(
                         """INSERT INTO usage_observations
@@ -432,18 +486,25 @@ class ControlPlane:
                 except sqlite3.IntegrityError as exc:
                     if "UNIQUE" not in str(exc):
                         raise
-                    duplicates += 1
-                    continue
+                    raise Conflict("observation conflicts with existing observation") from exc
                 inserted += 1
                 prev = db.execute(
                     """SELECT uplink_bytes,downlink_bytes FROM usage_observations
                        WHERE node_id=? AND runtime_ref_hash=? AND counter_epoch=?
-                         AND observed_at < ? ORDER BY observed_at DESC LIMIT 1""",
-                    (node_id, runtime_hash, counter_epoch, item_time),
+                         AND source=? AND observed_at < ? ORDER BY observed_at DESC LIMIT 1""",
+                    (node_id, runtime_hash, counter_epoch, source, item_time),
+                ).fetchone()
+                following = db.execute(
+                    """SELECT observation_id FROM usage_observations
+                       WHERE node_id=? AND runtime_ref_hash=? AND counter_epoch=?
+                         AND source=? AND observed_at > ? ORDER BY observed_at ASC LIMIT 1""",
+                    (node_id, runtime_hash, counter_epoch, source, item_time),
                 ).fetchone()
                 detail = "baseline"
                 delta_up = delta_down = 0
-                if prev:
+                if following:
+                    detail = "out_of_order_observation"
+                elif prev:
                     if up < prev[0] or down < prev[1]:
                         detail = "counter_reset_or_non_monotonic"
                     else:
@@ -479,11 +540,36 @@ class ControlPlane:
             )
         return {"inserted": inserted, "duplicates": duplicates, "unresolved": unresolved}
 
-    def _latest_coverage(self, db: sqlite3.Connection, node_id: str) -> str | None:
+    def _latest_coverage_record(self, db: sqlite3.Connection, node_id: str) -> sqlite3.Row | None:
         row = db.execute(
-            "SELECT status FROM coverage_events WHERE node_id=? ORDER BY observed_at DESC LIMIT 1", (node_id,)
+            """SELECT status,observed_at,source,detail FROM coverage_events
+               WHERE node_id=? ORDER BY observed_at DESC LIMIT 1""", (node_id,)
         ).fetchone()
-        return row[0] if row else None
+        return row
+
+    def _coverage_status(self, row: sqlite3.Row | None) -> str | None:
+        if row is None:
+            return None
+        status = row["status"]
+        if status != "available":
+            return status
+        observed = parse_time(row["observed_at"])
+        if observed is None:
+            return "unknown"
+        age = (datetime.now(timezone.utc) - observed).total_seconds()
+        return "stale" if age > self.coverage_max_age_seconds else "available"
+
+    def _latest_coverage(self, db: sqlite3.Connection, node_id: str) -> str | None:
+        return self._coverage_status(self._latest_coverage_record(db, node_id))
+
+    @staticmethod
+    def _coverage_age_seconds(row: sqlite3.Row | None) -> int | None:
+        if row is None:
+            return None
+        observed = parse_time(row["observed_at"])
+        if observed is None:
+            return None
+        return max(0, int((datetime.now(timezone.utc) - observed).total_seconds()))
 
     def _active_pool_nodes(self, db: sqlite3.Connection, pool_id: str) -> list[str]:
         rows = db.execute(
@@ -695,6 +781,7 @@ class ControlPlane:
                        WHERE node_id=? AND status='active' AND effective_to IS NULL
                        ORDER BY effective_from DESC LIMIT 1""", (row["node_id"],)
                 ).fetchone()
+                coverage = self._latest_coverage_record(db, row["node_id"])
                 usage = db.execute(
                     """SELECT COALESCE(SUM(delta_uplink_bytes+delta_downlink_bytes),0)
                        FROM usage_ledger WHERE node_id=?""", (row["node_id"],)
@@ -704,7 +791,9 @@ class ControlPlane:
                     "status": row["status"], "qualification": row["qualification"],
                     "pool_id": pool[0] if pool else None, "pool_membership_status": pool[1] if pool else None,
                     "infrastructure_usage_bytes": int(usage),
-                    "coverage_status": self._latest_coverage(db, row["node_id"]) or "unknown",
+                    "coverage_status": self._coverage_status(coverage) or "unknown",
+                    "coverage_observed_at": coverage["observed_at"] if coverage else None,
+                    "coverage_age_seconds": self._coverage_age_seconds(coverage),
                 })
             users = []
             for row in db.execute("SELECT user_id,display_name,plan,status FROM users ORDER BY user_id"):

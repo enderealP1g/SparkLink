@@ -13,4 +13,4 @@ The current requirements baseline is [Training Iteration #1: User Identity + Usa
 
 No credentials, UUIDs, subscription tokens, private keys, passwords, or other secrets belong in this documentation tree.
 
-本次 MVP 的 QQG origin deployment evidence 记录在 [Production MVP Control Plane Operations Record](operations/2026-08-29_PRODUCTION_MVP_CONTROL_PLANE.md)；其 public edge status 仍需单独验证。
+本次 MVP 的 QQG origin、public edge 与 metering operations evidence 记录在 [Production MVP Control Plane Operations Record](operations/2026-08-29_PRODUCTION_MVP_CONTROL_PLANE.md)；hardening evidence 见 [Metering hardening record](operations/2026-08-29_METERING_HARDENING.md)。

@@ -3,9 +3,10 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.sparklink_control_plane import App, Conflict, ControlPlane
+from src.sparklink_control_plane import App, Conflict, ControlPlane, ControlPlaneError
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -37,6 +38,113 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(premium["used_bytes"], 350)
         self.assertEqual(premium["remaining_bytes"], None)
         self.assertEqual(view["total_usage_bytes"], 350)
+
+    def test_counter_reset_same_epoch_does_not_create_negative_or_fake_delta(self):
+        runtime = "f" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 100, "downlink_bytes": 200}],
+            "2026-09-02T00:00:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 50, "downlink_bytes": 250}],
+            "2026-09-02T00:01:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 70, "downlink_bytes": 300}],
+            "2026-09-02T00:02:00Z",
+        )
+        view = self.cp.user_view(self.user["portal_token"])
+        premium = next(p for p in view["pools"] if p["pool_id"] == "PREMIUM")
+        self.assertEqual(premium["used_bytes"], 70)
+        db = self.cp.connect()
+        try:
+            details = [row[0] for row in db.execute(
+                "SELECT detail FROM usage_ledger WHERE node_id='hypro02' ORDER BY observed_at"
+            )]
+        finally:
+            db.close()
+        self.assertEqual(details, ["baseline", "counter_reset_or_non_monotonic", "delta"])
+
+    def test_duplicate_observation_is_idempotent_and_conflict_is_rejected(self):
+        runtime = "c" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        body = [{
+            "observation_id": "fixed-observation",
+            "runtime_ref_hash": runtime,
+            "uplink_bytes": 10,
+            "downlink_bytes": 20,
+        }]
+        first = self.cp.ingest_observations("hypro02", "test", "epoch-1", body, "2026-09-02T00:00:00Z")
+        duplicate = self.cp.ingest_observations("hypro02", "test", "epoch-1", body, "2026-09-02T00:00:00Z")
+        self.assertEqual(first["inserted"], 1)
+        self.assertEqual(duplicate["inserted"], 0)
+        self.assertEqual(duplicate["duplicates"], 1)
+        with self.assertRaises(Conflict):
+            self.cp.ingest_observations(
+                "hypro02", "test", "epoch-1",
+                [{**body[0], "uplink_bytes": 11}],
+                "2026-09-02T00:00:00Z",
+            )
+
+    def test_out_of_order_observation_does_not_double_count_later_delta(self):
+        runtime = "d" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 200, "downlink_bytes": 200}],
+            "2026-09-02T00:02:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 100, "downlink_bytes": 100}],
+            "2026-09-02T00:01:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 250, "downlink_bytes": 250}],
+            "2026-09-02T00:03:00Z",
+        )
+        view = self.cp.user_view(self.user["portal_token"])
+        premium = next(p for p in view["pools"] if p["pool_id"] == "PREMIUM")
+        self.assertEqual(premium["used_bytes"], 100)
+        db = self.cp.connect()
+        try:
+            details = [row[0] for row in db.execute(
+                "SELECT detail FROM usage_ledger WHERE node_id='hypro02' ORDER BY observed_at"
+            )]
+        finally:
+            db.close()
+        self.assertEqual(details, ["out_of_order_observation", "baseline", "delta"])
+
+    def test_stale_coverage_is_not_reported_as_available(self):
+        runtime = "e" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        old = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        short_window = ControlPlane(self.db, coverage_max_age_seconds=60)
+        short_window.set_coverage("hypro02", "test", "available", "old sample", old)
+        overview = short_window.admin_overview()
+        node = next(item for item in overview["nodes"] if item["node_id"] == "hypro02")
+        self.assertEqual(node["coverage_status"], "stale")
+        view = short_window.user_view(self.user["portal_token"])
+        premium = next(p for p in view["pools"] if p["pool_id"] == "PREMIUM")
+        self.assertEqual(premium["coverage_status"], "unknown")
+        self.assertIsNone(premium["used_bytes"])
+
+    def test_naive_timestamps_are_rejected_for_coverage_and_observations(self):
+        with self.assertRaises(ControlPlaneError):
+            self.cp.set_coverage("hypro02", "test", "available", "naive", "2026-09-02T00:00:00")
+        runtime = "1" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        with self.assertRaises(ControlPlaneError):
+            self.cp.ingest_observations(
+                "hypro02", "test", "epoch-1",
+                [{"runtime_ref_hash": runtime, "uplink_bytes": 1, "downlink_bytes": 1}],
+                "2026-09-02T00:00:00",
+            )
 
     def test_unmapped_usage_is_not_zero(self):
         runtime = "b" * 64

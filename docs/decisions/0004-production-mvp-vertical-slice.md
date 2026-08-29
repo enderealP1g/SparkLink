@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Accepted — Product Owner execution authorization, 2026-08-29 |
-| Scope | User identity、Usage Metering、最小 Portal、Subscription delivery 与 manual operations fallback |
+| Scope | User identity、Usage Metering、最小 Portal、Subscription delivery 与 operations fallback |
 | Related requirements | `FR-01`–`FR-18`、`NFR-01`–`NFR-07` |
 
 ## Decision
@@ -39,7 +39,7 @@ Control Plane 与 proxy data plane 通过独立 process、独立 local port、�
 
 - `Xray` production paths 是当前 primary observation surface。
 - 已验证的 Xray Stats API 以 read-only pull 方式读取；counter reset 通过 `counter_epoch` 与 idempotency key 隔离。
-- Windows control plane 先以 manual collector/ingest 作为 operations fallback，避免把 SSH credentials 放到 VPS。Collector failure 只形成 freshness/coverage state，不停止 proxy data plane。
+- Windows protected control plane 上的 automatic collector/ingest 作为正常路径，one-shot manual collector 作为 operations fallback；SSH credentials 不放到 VPS。Collector failure 只形成 freshness/coverage state，不停止 proxy data plane。具体 lifecycle hardening 见 [`ADR-0005`](0005-metering-hardening-and-automatic-collection.md)。
 - source unavailable、unresolved mapping、stale observation 与 coverage gap 显示为 `Unknown`/明确状态，不显示为 zero。
 - DediRock 当前 Xray Stats API gap 不通过整机 bytes、Nginx bytes 或 AnyTLS bytes 推算 User Usage。
 
@@ -57,8 +57,8 @@ Control Plane 与 proxy data plane 通过独立 process、独立 local port、�
 
 ## Consequences
 
-- MVP 可以提供真实 User/Usage/Subscription 闭环，同时不需要 microservices、event bus、policy DSL 或 automatic scheduler。
-- Manual collector、manual User/Credential mapping 和 manual upgrade review 是有意保留的 operational fallback，不是隐藏的自动化能力。
+- MVP 可以提供真实 User/Usage/Subscription 闭环，同时不需要 microservices、event bus、policy DSL 或 product scheduler。
+- One-shot manual collector、manual User/Credential mapping 和 manual upgrade review 是有意保留的 operational fallback；automatic collector 的 Windows OS supervisor 不是产品业务调度能力。
 - 若 Control Plane 或 metering unavailable，用户现有 proxy data plane 继续运行，但 usage freshness、coverage 或 subscription view 可以明确显示 unavailable。
 - `spark.enrpiglink.top` 与 `sub.enrpiglink.top` 的最终 public binding 仍需要受保护的 Cloudflare control-plane access；缺失时只能完成 local/QQG staging，不能伪造上线状态。
 

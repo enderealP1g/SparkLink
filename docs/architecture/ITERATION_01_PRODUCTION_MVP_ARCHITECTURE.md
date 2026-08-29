@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | To-Be implementation baseline — 2026-08-29 |
-| Decision | [`ADR-0004`](../decisions/0004-production-mvp-vertical-slice.md) |
+| Decision | [`ADR-0004`](../decisions/0004-production-mvp-vertical-slice.md)、[`ADR-0005`](../decisions/0005-metering-hardening-and-automatic-collection.md) |
 | Scope | User Identity + Usage Metering + minimum Portal/Subscription vertical slice |
 
 ## Boundary
@@ -53,7 +53,7 @@ usage_observations (raw, append-preserving)
 - RackNerd、VMISS：读取 verified loopback Xray Stats API；`x-ui client_traffics` 只作为 recovery/reconciliation source，不与 Stats API counters 直接相加。
 - `hypro02`：纳入前必须确认或以可回滚方式启用 loopback-only Xray Stats API；Stats API failure 不能影响 Xray serving。
 - DediRock：继续记录 per-user statistics coverage gap；不使用整机或 Nginx totals 伪造 User Usage。
-- Windows `manual collector` 通过 SSH read-only query 获取 counters，哈希 runtime identity 后向 Control Plane ingest。SSH private keys 只留在 Windows protected runtime location。
+- Windows automatic `collector service` 通过 SSH read-only query 获取 counters，哈希 runtime identity 后向 Control Plane ingest；one-shot `manual collector` 保留为 fallback。SSH private keys 只留在 Windows protected runtime location。
 - AnyTLS、provider resource cycle 和 future adapters 通过独立 capability/status 表示，不自动获得 Customer Usage authority。
 
 ## User and Credential migration
@@ -84,7 +84,7 @@ usage_observations (raw, append-preserving)
 
 ## Deployment shape
 
-第一版是一个独立 Python process + SQLite file + static Portal assets。它不依赖 Xray/sing-box startup，也不监听或修改 proxy ports。public HTTPS 由现有 Cloudflare boundary/reverse proxy 提供；在完成 Cloudflare control-plane reconciliation 前，QQG 上只允许做隔离 staging，不宣称 `spark.enrpiglink.top` 已完成切换。
+第一版是一个独立 Python process + SQLite file + static Portal assets，配合 Windows protected control plane 上的 automatic collector process。它不依赖 Xray/sing-box startup，也不监听或修改 proxy ports。public HTTPS 由现有 Cloudflare boundary/reverse proxy 提供；collector 的 OS supervisor 只负责进程存活，不承载产品 scheduling。
 
 ## Deferred
 
@@ -93,4 +93,4 @@ usage_observations (raw, append-preserving)
 - DediRock Stats API remediation；
 - AnyTLS precise accounting；
 - Clash output；
-- automatic scheduling、fleet orchestration、provider automation、Operation subsystem。
+- product scheduling、fleet orchestration、provider automation、Operation subsystem。
