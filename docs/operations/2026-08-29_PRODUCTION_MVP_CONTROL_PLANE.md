@@ -58,6 +58,8 @@ Wrangler 的 Custom Domain 方式因目标 hostname 已存在 externally managed
 
 公网 acceptance 已通过：`spark.enrpiglink.top/` 与 `/healthz` 返回 `200`；带受保护 User token 的 `/api/me` 返回当前 `Plus` User、Billing Cycle、两 Pool 的 `available` coverage 及真实 Usage；`sub.enrpiglink.top/u/<portal-token>` 返回 `200`，Base64 解码后为 6 条 V2rayN/V2rayNG-compatible `vless` entries。错误 token 返回 `401`，错误路径返回 `404`，未输出任何 token 或 subscription material。
 
+同一公网 response 由全新 isolated v2rayN `7.18.0` 实例通过其 subscription updater 获取成功并生成 6 个 `VLESS/REALITY` profiles，其中包含 2 个 hypro02 profiles。该实例未启动本地代理服务，因为 `10808` 已被现有 live v2rayN 占用；实际外连验证由临时 isolated Xray client 完成，避免触碰 live client。
+
 Worker 只位于 management/subscription delivery boundary；QQG proxy listeners 和 `sparklink-control-plane` 保持独立，Worker/Portal failure 不成为现有 proxy data plane 的 inline dependency。
 
 ## Rollback points
