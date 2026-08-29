@@ -52,7 +52,7 @@ Control Plane 是独立 process，不是 Xray、Nginx 或 WireProxy 的 inline d
 
 ## Public edge status
 
-QQG origin path 继续提供 `/sparklink-mvp/` reverse proxy，并保留原 CDN VLESS exact path。新的 edge Worker source 位于 [`cloudflare/sparklink-edge-worker.js`](../../cloudflare/sparklink-edge-worker.js)。2026-08-29 通过 Wrangler OAuth 部署 `sparklink-edge`，version 为 `14dc2663-6e41-4993-bbf8-cbdc4849401f`，`CONTROL_PLANE_ORIGIN` 作为受保护 deployment variable 配置。
+QQG origin path 继续提供 `/sparklink-mvp/` reverse proxy，并保留原 CDN VLESS exact path。新的 edge Worker source 位于 [`cloudflare/sparklink-edge-worker.js`](../../cloudflare/sparklink-edge-worker.js)。2026-08-29 通过 Wrangler OAuth 部署 `sparklink-edge`，当前 deployment 已激活，`CONTROL_PLANE_ORIGIN` 作为受保护 deployment variable 配置。
 
 Wrangler 的 Custom Domain 方式因目标 hostname 已存在 externally managed DNS record 而被 Cloudflare 拒绝；未删除或改写 DNS。保留现有 proxied DNS 后，仅为 `spark.enrpiglink.top/*` 与 `sub.enrpiglink.top/*` 创建 Workers Route，旧的 `sparklink-subscriptions` Worker 和其他 route 未修改。
 
@@ -68,7 +68,7 @@ Worker 只位于 management/subscription delivery boundary；QQG proxy listeners
 - Nginx management path 的 pre-change backup：`/var/backups/sparklink-control-plane/nginx-20260829T033112Z.conf`。
 - rollback 前必须恢复原 file owner/group/mode，运行 `xray run -test` 或 `nginx -t`，再 restart/reload 并验证 443、10080、62789、8080。
 - SQLite historical Usage 不通过 rollback 删除；任何 schema/data rollback 必须先复制受保护 database backup，并保留 append-preserving ledger。
-- Cloudflare Worker rollback point 为 version `14dc2663-6e41-4993-bbf8-cbdc4849401f`；需要回退时使用受保护 Wrangler OAuth 执行 version rollback，并保留当前 Workers Route 配置记录。不要删除 Worker 作为 rollback。
+- Cloudflare Worker rollback point 为当前已部署 version；需要回退时先通过受保护 Wrangler OAuth 的 deployment history 解析 version，再执行 version rollback，并保留当前 Workers Route 配置记录。不要删除 Worker 作为 rollback。
 
 ## Known gaps and manual fallback
 
