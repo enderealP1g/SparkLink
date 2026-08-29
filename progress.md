@@ -14,4 +14,6 @@
 - StatsService 已以 loopback-only 方式启用；Xray/Nginx/WireProxy/Control Plane reboot recovery 通过，Xray counter epoch 变化不会重写旧 ledger。
 - 已导入 6 条 `vless` subscription entries（RackNerd Standard、VMISS Premium、hypro02 REALITY Premium），AnyTLS、DediRock 和 CDN standby identities 未进入正式 User surface。
 - 两次 collector ingest 后，manual Plus User 的 Standard used=`0`、Premium used=`611798` bytes、total=`611798`，两 Pool coverage=`available`；未配置 allowance 保持 unknown/NULL。
-- QQG Nginx `/sparklink-mvp/` origin path、Portal、Bearer API 和 Bearer subscription HTTP smoke 通过；Cloudflare public `spark`=`521`、`sub` root=`404`，本机无 `wrangler`/Cloudflare credential，因此 public cutover 停在人工 blocker。
+- QQG Nginx `/sparklink-mvp/` origin path、Portal、Bearer API 和 Bearer subscription HTTP smoke 通过；此前 public `spark`=`521` 的 blocker 已通过 Wrangler OAuth deployment 解除。仅为 `spark.enrpiglink.top/*`、`sub.enrpiglink.top/*` 创建 `sparklink-edge` Workers Routes；其他 Worker/route/DNS 未修改。
+- 公网 acceptance 通过：Portal root/healthz=`200`，真实 User API 返回 `Plus`、两 Pool `available` coverage；subscription=`200` 且返回 6 条 `vless` entries。错误 token=`401`、错误路径=`404`。
+- 公网 subscription 派生的 isolated Xray client 实际验证 hypro02 Origin/HyTru `VLESS/REALITY`；两条 path 的 Google=`204`、Google AI=`200`、OpenAI/Anthropic=`401`、Gemini=`403`。collector 随后 ingest hypro02 两个 observations，Premium Usage 从 `611798` 增长到 `1223310` bytes。

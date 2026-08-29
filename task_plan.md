@@ -13,7 +13,7 @@
 - [x] Phase 4 — 接入真实 Xray metering，明确 unknown/error 与 data-plane isolation 语义
 - [x] Phase 5 — 实现 Portal/Admin 最小视图，复用并验证既有 subscription delivery boundary
 - [x] Phase 6 — 测试、部署、迁移/人工 fallback 与 production verification
-- [ ] Phase 7 — 文档、审计摘要、commit 与最终交付报告（public Cloudflare cutover 仍待授权）
+- [x] Phase 7 — 文档、审计摘要、public Cloudflare deployment 与最终交付 checkpoint
 
 ## 不可越界
 
@@ -26,4 +26,4 @@
 
 ## 当前状态
 
-当前 Phase 1–6 已完成。Phase 7 可提交当前 checkpoint，但 public Cloudflare cutover 仍是外部 blocker；Candidate Architecture 继续保留为 Proposal，不得直接当作已批准 To-Be Architecture。
+当前 Phase 1–7 已完成。Candidate Architecture 继续保留为 Proposal，不得直接当作已批准 To-Be Architecture；AnyTLS、Allowance/upgrade semantics 与长期 `PREMIUM / CONDITIONAL` qualification 仍按既有 Open Question/operations boundary 处理。
