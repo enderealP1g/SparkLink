@@ -16,10 +16,11 @@ import secrets
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote
 from wsgiref.simple_server import WSGIRequestHandler, make_server
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,14 @@ STATIC_DIR = ROOT / "web"
 PLAN_ORDER = {"Free": 0, "Basic": 1, "Plus": 2}
 POOL_NAMES = ("STANDARD", "PREMIUM")
 DEFAULT_COVERAGE_MAX_AGE_SECONDS = 900
+CUSTOMER_CYCLE_TIMEZONE = "Asia/Shanghai"
+CUSTOMER_CYCLE_POLICY_ID = "customer-monthly-15th-asia-shanghai-v1"
+try:
+    CUSTOMER_CYCLE_ZONE = ZoneInfo(CUSTOMER_CYCLE_TIMEZONE)
+except ZoneInfoNotFoundError:
+    # Asia/Shanghai has no DST transition; keep the canonical name in metadata.
+    CUSTOMER_CYCLE_ZONE = timezone(timedelta(hours=8), name=CUSTOMER_CYCLE_TIMEZONE)
+CUSTOMER_CYCLE_BASELINE = datetime(2026, 9, 15, tzinfo=CUSTOMER_CYCLE_ZONE)
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -56,6 +65,47 @@ CREATE TABLE IF NOT EXISTS nodes (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS infrastructure_resources (
+    resource_id TEXT PRIMARY KEY,
+    provider_name TEXT NOT NULL,
+    provider_instance_id TEXT NOT NULL UNIQUE,
+    node_id TEXT REFERENCES nodes(node_id),
+    location TEXT NOT NULL,
+    network_label TEXT NOT NULL,
+    asn TEXT,
+    public_ipv4 TEXT,
+    cpu_cores INTEGER,
+    memory_gib REAL,
+    disk_gib REAL,
+    bandwidth_limit TEXT,
+    transfer_limit TEXT,
+    local_timezone TEXT NOT NULL,
+    timezone_source TEXT NOT NULL,
+    contract_cycle TEXT,
+    contract_amount TEXT,
+    contract_currency TEXT,
+    next_due_local TEXT,
+    next_due_timezone TEXT,
+    next_due_source TEXT,
+    resource_cycle_status TEXT NOT NULL,
+    resource_cycle_source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_resource_cycles (
+    provider_cycle_id TEXT PRIMARY KEY,
+    resource_id TEXT NOT NULL REFERENCES infrastructure_resources(resource_id),
+    cycle_key TEXT NOT NULL,
+    starts_at TEXT,
+    ends_at TEXT,
+    timezone TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    traffic_reset_authoritative INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(resource_id, cycle_key)
+);
+
 CREATE TABLE IF NOT EXISTS node_pool_memberships (
     node_id TEXT NOT NULL REFERENCES nodes(node_id),
     pool_id TEXT NOT NULL REFERENCES resource_pools(pool_id),
@@ -69,8 +119,10 @@ CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     plan TEXT NOT NULL CHECK(plan IN ('Free', 'Basic', 'Plus')),
+    role TEXT NOT NULL DEFAULT 'CUSTOMER',
     status TEXT NOT NULL,
     portal_token_hash TEXT NOT NULL UNIQUE,
+    subscription_token TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL
 );
 
@@ -82,6 +134,11 @@ CREATE TABLE IF NOT EXISTS billing_cycles (
     ends_at TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    cycle_kind TEXT NOT NULL DEFAULT 'legacy',
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    policy_id TEXT NOT NULL DEFAULT 'legacy',
+    commercial_applies INTEGER NOT NULL DEFAULT 0,
+    baseline_at TEXT,
     UNIQUE(user_id, cycle_key)
 );
 
@@ -103,6 +160,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     runtime_ref_hash TEXT NOT NULL,
     runtime_family TEXT NOT NULL,
     protocol TEXT NOT NULL,
+    credential_kind TEXT NOT NULL DEFAULT 'legacy',
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(node_id, runtime_ref_hash)
@@ -139,6 +197,7 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     node_id TEXT NOT NULL REFERENCES nodes(node_id),
     pool_id TEXT REFERENCES resource_pools(pool_id),
     cycle_id TEXT REFERENCES billing_cycles(cycle_id),
+    provider_cycle_id TEXT REFERENCES provider_resource_cycles(provider_cycle_id),
     observed_at TEXT NOT NULL,
     delta_uplink_bytes INTEGER NOT NULL,
     delta_downlink_bytes INTEGER NOT NULL,
@@ -162,9 +221,11 @@ CREATE TABLE IF NOT EXISTS subscription_entries (
     user_id TEXT NOT NULL REFERENCES users(user_id),
     node_id TEXT REFERENCES nodes(node_id),
     pool_id TEXT REFERENCES resource_pools(pool_id),
+    credential_id TEXT REFERENCES credentials(credential_id),
     protocol TEXT NOT NULL,
     uri TEXT NOT NULL,
     minimum_plan TEXT NOT NULL CHECK(minimum_plan IN ('Free', 'Basic', 'Plus')),
+    projection_status TEXT NOT NULL DEFAULT 'current',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -190,6 +251,43 @@ def parse_time(value: str | None) -> datetime | None:
         return parsed if parsed.tzinfo is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def normalize_time(value: str | None) -> str | None:
+    parsed = parse_time(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _add_months(year: int, month: int, offset: int) -> tuple[int, int]:
+    index = year * 12 + (month - 1) + offset
+    return index // 12, index % 12 + 1
+
+
+def customer_cycle_window(value: str | datetime) -> tuple[str, str, str, str] | None:
+    parsed = value if isinstance(value, datetime) else parse_time(value)
+    if parsed is None or parsed.tzinfo is None:
+        return None
+    local = parsed.astimezone(CUSTOMER_CYCLE_ZONE)
+    if local < CUSTOMER_CYCLE_BASELINE:
+        return None
+    year, month = local.year, local.month
+    if local.day < 15:
+        year, month = _add_months(year, month, -1)
+    end_year, end_month = _add_months(year, month, 1)
+    start_local = datetime(year, month, 15, tzinfo=CUSTOMER_CYCLE_ZONE)
+    end_local = datetime(end_year, end_month, 15, tzinfo=CUSTOMER_CYCLE_ZONE)
+    return (
+        start_local.date().isoformat(),
+        normalize_time(start_local.isoformat()),
+        normalize_time(end_local.isoformat()),
+        CUSTOMER_CYCLE_POLICY_ID,
+    )
+
+
+def customer_cycle_baseline_utc() -> str:
+    return normalize_time(CUSTOMER_CYCLE_BASELINE.isoformat()) or "2026-09-14T16:00:00Z"
 
 
 def ref_hash(runtime_ref: str) -> str:
@@ -246,6 +344,45 @@ class ControlPlane:
             raise ValueError("coverage_max_age_seconds must be positive")
         self.coverage_max_age_seconds = configured_age
 
+    @staticmethod
+    def _migrate_schema(db: sqlite3.Connection) -> None:
+        additions = {
+            "users": {
+                "role": "TEXT NOT NULL DEFAULT 'CUSTOMER'",
+                "subscription_token": "TEXT",
+            },
+            "billing_cycles": {
+                "cycle_kind": "TEXT NOT NULL DEFAULT 'legacy'",
+                "timezone": "TEXT NOT NULL DEFAULT 'Asia/Shanghai'",
+                "policy_id": "TEXT NOT NULL DEFAULT 'legacy'",
+                "commercial_applies": "INTEGER NOT NULL DEFAULT 0",
+                "baseline_at": "TEXT",
+            },
+            "credentials": {"credential_kind": "TEXT NOT NULL DEFAULT 'legacy'"},
+            "usage_ledger": {"provider_cycle_id": "TEXT"},
+            "subscription_entries": {
+                "credential_id": "TEXT",
+                "projection_status": "TEXT NOT NULL DEFAULT 'current'",
+            },
+        }
+        for table, columns in additions.items():
+            existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+            for column, definition in columns.items():
+                if column not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        missing_tokens = db.execute(
+            "SELECT user_id FROM users WHERE subscription_token IS NULL OR subscription_token=''"
+        ).fetchall()
+        for row in missing_tokens:
+            db.execute(
+                "UPDATE users SET subscription_token=? WHERE user_id=?",
+                (new_token(), row[0]),
+            )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_subscription_token "
+            "ON users(subscription_token)"
+        )
+
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         db = sqlite3.connect(self.db_path, factory=ClosingConnection)
@@ -257,6 +394,7 @@ class ControlPlane:
     def init_db(self) -> None:
         with self.connect() as db:
             db.executescript(SCHEMA_SQL)
+            self._migrate_schema(db)
             now = utc_now()
             for pool in POOL_NAMES:
                 db.execute(
@@ -288,6 +426,89 @@ class ControlPlane:
                     (node_id, pool_id, "2026-08-24T00:00:00Z", "active"),
                 )
 
+    def upsert_infrastructure_resource(self, resource: dict) -> str:
+        required = {
+            "resource_id", "provider_name", "provider_instance_id", "location", "network_label",
+            "local_timezone", "timezone_source", "resource_cycle_status", "resource_cycle_source",
+        }
+        if not required.issubset(resource):
+            raise ControlPlaneError("infrastructure resource fields are incomplete")
+        resource_id = str(resource["resource_id"])
+        now = utc_now()
+        values = (
+            resource_id, str(resource["provider_name"]), str(resource["provider_instance_id"]),
+            resource.get("node_id"), str(resource["location"]), str(resource["network_label"]),
+            resource.get("asn"), resource.get("public_ipv4"), resource.get("cpu_cores"),
+            resource.get("memory_gib"), resource.get("disk_gib"), resource.get("bandwidth_limit"),
+            resource.get("transfer_limit"), str(resource["local_timezone"]),
+            str(resource["timezone_source"]), resource.get("contract_cycle"),
+            resource.get("contract_amount"), resource.get("contract_currency"),
+            resource.get("next_due_local"), resource.get("next_due_timezone"),
+            resource.get("next_due_source"), str(resource["resource_cycle_status"]),
+            str(resource["resource_cycle_source"]), now,
+        )
+        with self.connect() as db:
+            if resource.get("node_id") and db.execute(
+                "SELECT 1 FROM nodes WHERE node_id=?", (resource["node_id"],)
+            ).fetchone() is None:
+                raise NotFound("node not found")
+            exists = db.execute(
+                "SELECT 1 FROM infrastructure_resources WHERE resource_id=?", (resource_id,)
+            ).fetchone()
+            if exists:
+                db.execute(
+                    """UPDATE infrastructure_resources SET
+                           provider_name=?,provider_instance_id=?,node_id=?,location=?,network_label=?,
+                           asn=?,public_ipv4=?,cpu_cores=?,memory_gib=?,disk_gib=?,bandwidth_limit=?,
+                           transfer_limit=?,local_timezone=?,timezone_source=?,contract_cycle=?,
+                           contract_amount=?,contract_currency=?,next_due_local=?,next_due_timezone=?,
+                           next_due_source=?,resource_cycle_status=?,resource_cycle_source=?
+                       WHERE resource_id=?""",
+                    (*values[1:-1], resource_id),
+                )
+            else:
+                db.execute(
+                    """INSERT INTO infrastructure_resources(
+                           resource_id,provider_name,provider_instance_id,node_id,location,network_label,
+                           asn,public_ipv4,cpu_cores,memory_gib,disk_gib,bandwidth_limit,transfer_limit,
+                           local_timezone,timezone_source,contract_cycle,contract_amount,contract_currency,
+                           next_due_local,next_due_timezone,next_due_source,resource_cycle_status,
+                           resource_cycle_source,created_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    values,
+                )
+        return resource_id
+
+    def record_provider_resource_cycle(self, cycle: dict) -> str:
+        required = {"provider_cycle_id", "resource_id", "cycle_key", "timezone", "status", "source"}
+        if not required.issubset(cycle):
+            raise ControlPlaneError("provider resource cycle fields are incomplete")
+        starts_at = normalize_time(cycle.get("starts_at")) if cycle.get("starts_at") else None
+        ends_at = normalize_time(cycle.get("ends_at")) if cycle.get("ends_at") else None
+        if ((cycle.get("starts_at") and starts_at is None)
+                or (cycle.get("ends_at") and ends_at is None)):
+            raise ControlPlaneError("provider cycle timestamps must be ISO-8601")
+        provider_cycle_id = str(cycle["provider_cycle_id"])
+        with self.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM infrastructure_resources WHERE resource_id=?", (cycle["resource_id"],)
+            ).fetchone() is None:
+                raise NotFound("infrastructure resource not found")
+            db.execute(
+                """INSERT INTO provider_resource_cycles(
+                       provider_cycle_id,resource_id,cycle_key,starts_at,ends_at,timezone,status,source,
+                       traffic_reset_authoritative,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(resource_id,cycle_key) DO UPDATE SET
+                       starts_at=excluded.starts_at,ends_at=excluded.ends_at,timezone=excluded.timezone,
+                       status=excluded.status,source=excluded.source,
+                       traffic_reset_authoritative=excluded.traffic_reset_authoritative""",
+                (provider_cycle_id, str(cycle["resource_id"]), str(cycle["cycle_key"]), starts_at, ends_at,
+                 str(cycle["timezone"]), str(cycle["status"]), str(cycle["source"]),
+                 int(bool(cycle.get("traffic_reset_authoritative", False))), utc_now()),
+            )
+        return provider_cycle_id
+
     def _require_admin(self, supplied: str | None) -> None:
         if not self.admin_token or not supplied or not secrets.compare_digest(supplied, self.admin_token):
             raise Unauthorized("admin authentication required")
@@ -304,32 +525,200 @@ class ControlPlane:
             raise Unauthorized("invalid or revoked user token")
         return row
 
+    def _user_by_subscription_token(self, token: str | None) -> sqlite3.Row:
+        if not token:
+            raise Unauthorized("subscription token required")
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM users
+                   WHERE status='active' AND subscription_token=?""",
+                (token,),
+            ).fetchone()
+        if row is None:
+            raise Unauthorized("invalid or revoked subscription token")
+        return row
+
     def create_user(self, display_name: str, plan: str = "Free", user_id: str | None = None,
-                    portal_token: str | None = None) -> dict:
+                    portal_token: str | None = None, subscription_token: str | None = None,
+                    role: str = "CUSTOMER") -> dict:
         if plan not in PLAN_ORDER:
             raise ControlPlaneError("invalid plan")
+        if role not in {"CUSTOMER", "OWNER"}:
+            raise ControlPlaneError("invalid user role")
         uid = user_id or f"usr_{uuid.uuid4().hex}"
         token = portal_token or new_token()
+        sub_token = subscription_token or new_token()
         now = utc_now()
         with self.connect() as db:
             db.execute(
-                "INSERT INTO users(user_id, display_name, plan, status, portal_token_hash, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
-                (uid, display_name, plan, token_hash(token), now),
+                """INSERT INTO users(
+                       user_id,display_name,plan,role,status,portal_token_hash,subscription_token,created_at
+                   ) VALUES (?,?,?,?,'active',?,?,?)""",
+                (uid, display_name, plan, role, token_hash(token), sub_token, now),
             )
-        return {"user_id": uid, "portal_token": token}
+        return {"user_id": uid, "portal_token": token, "subscription_token": sub_token}
 
-    def create_cycle(self, user_id: str, cycle_key: str, starts_at: str | None, ends_at: str | None) -> str:
+    def reconcile_user(self, user_id: str, display_name: str, plan: str,
+                       role: str = "CUSTOMER", portal_token: str | None = None,
+                       subscription_token: str | None = None) -> dict:
+        """Create or reconcile current identity metadata without rewriting usage."""
+        if plan not in PLAN_ORDER:
+            raise ControlPlaneError("invalid plan")
+        if role not in {"CUSTOMER", "OWNER"}:
+            raise ControlPlaneError("invalid user role")
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if row is None:
+                token = portal_token or new_token()
+                sub_token = subscription_token or new_token()
+                db.execute(
+                    """INSERT INTO users(
+                           user_id,display_name,plan,role,status,portal_token_hash,subscription_token,created_at
+                       ) VALUES (?,?,?,?,'active',?,?,?)""",
+                    (user_id, display_name, plan, role, token_hash(token), sub_token, utc_now()),
+                )
+                return {"user_id": user_id, "portal_token": token,
+                        "subscription_token": sub_token, "created": True}
+            portal_hash = token_hash(portal_token) if portal_token is not None else row["portal_token_hash"]
+            current_sub_token = row["subscription_token"] or subscription_token or new_token()
+            db.execute(
+                """UPDATE users SET display_name=?,plan=?,role=?,status='active',
+                          portal_token_hash=?,subscription_token=? WHERE user_id=?""",
+                (display_name, plan, role, portal_hash, current_sub_token, user_id),
+            )
+            return {"user_id": user_id, "portal_token": portal_token,
+                    "subscription_token": current_sub_token, "created": False}
+
+    def create_cycle(self, user_id: str, cycle_key: str, starts_at: str | None, ends_at: str | None,
+                     cycle_kind: str = "manual", cycle_timezone: str = CUSTOMER_CYCLE_TIMEZONE,
+                     policy_id: str = "manual", commercial_applies: bool = False,
+                     baseline_at: str | None = None, status: str = "active") -> str:
         cycle_id = f"cyc_{uuid.uuid4().hex}"
         now = utc_now()
+        normalized_start = normalize_time(starts_at) if starts_at else None
+        normalized_end = normalize_time(ends_at) if ends_at else None
+        if ((starts_at and normalized_start is None)
+                or (ends_at and normalized_end is None)):
+            raise ControlPlaneError("cycle timestamps must be ISO-8601")
         with self.connect() as db:
             if db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone() is None:
                 raise NotFound("user not found")
-            db.execute("UPDATE billing_cycles SET status='closed' WHERE user_id=? AND status='active'", (user_id,))
+            if status == "active":
+                db.execute("UPDATE billing_cycles SET status='closed' WHERE user_id=? AND status='active'", (user_id,))
             db.execute(
-                "INSERT INTO billing_cycles(cycle_id,user_id,cycle_key,starts_at,ends_at,status,created_at) VALUES (?,?,?,?,?,'active',?)",
-                (cycle_id, user_id, cycle_key, starts_at, ends_at, now),
+                """INSERT INTO billing_cycles(
+                       cycle_id,user_id,cycle_key,starts_at,ends_at,status,created_at,
+                       cycle_kind,timezone,policy_id,commercial_applies,baseline_at
+                   ) VALUES (?,?,?,?,?,?,?, ?,?,?,?,?)""",
+                (cycle_id, user_id, cycle_key, normalized_start, normalized_end, status, now,
+                 cycle_kind, cycle_timezone, policy_id, int(commercial_applies),
+                 normalize_time(baseline_at) if baseline_at else None),
             )
         return cycle_id
+
+    @staticmethod
+    def _ensure_customer_cycle(db: sqlite3.Connection, user_id: str, observed_at: str) -> str | None:
+        window = customer_cycle_window(observed_at)
+        if window is None:
+            return None
+        cycle_key, starts_at, ends_at, policy_id = window
+        row = db.execute(
+            "SELECT cycle_id FROM billing_cycles WHERE user_id=? AND cycle_key=?",
+            (user_id, cycle_key),
+        ).fetchone()
+        if row:
+            start = parse_time(starts_at)
+            end = parse_time(ends_at)
+            now = datetime.now(timezone.utc)
+            status = "active" if start and end and start <= now < end else ("scheduled" if start and now < start else "closed")
+            if status == "active":
+                db.execute(
+                    "UPDATE billing_cycles SET status='closed' WHERE user_id=? AND status='active' AND cycle_key<>?",
+                    (user_id, cycle_key),
+                )
+            db.execute(
+                """UPDATE billing_cycles
+                   SET cycle_kind='customer',timezone=?,policy_id=?,commercial_applies=1,baseline_at=?,
+                       starts_at=?,ends_at=?,status=?
+                   WHERE cycle_id=?""",
+                (CUSTOMER_CYCLE_TIMEZONE, policy_id, customer_cycle_baseline_utc(), starts_at, ends_at,
+                 status, row[0]),
+            )
+            return row[0]
+        cycle_id = f"cyc_{uuid.uuid4().hex}"
+        start = parse_time(starts_at)
+        end = parse_time(ends_at)
+        now = datetime.now(timezone.utc)
+        status = "active" if start and end and start <= now < end else ("scheduled" if start and now < start else "closed")
+        if status == "active":
+            db.execute(
+                "UPDATE billing_cycles SET status='closed' WHERE user_id=? AND status='active'",
+                (user_id,),
+            )
+        db.execute(
+            """INSERT INTO billing_cycles(
+                   cycle_id,user_id,cycle_key,starts_at,ends_at,status,created_at,
+                   cycle_kind,timezone,policy_id,commercial_applies,baseline_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (cycle_id, user_id, cycle_key, starts_at, ends_at, status, utc_now(),
+             "customer", CUSTOMER_CYCLE_TIMEZONE, policy_id, 1, customer_cycle_baseline_utc()),
+        )
+        return cycle_id
+
+    def reconcile_customer_cycles(self, user_ids: list[str]) -> dict:
+        baseline = customer_cycle_baseline_utc()
+        first_window = customer_cycle_window(CUSTOMER_CYCLE_BASELINE)
+        if first_window is None:
+            raise ControlPlaneError("customer cycle baseline is invalid")
+        first_key, first_start, first_end, _ = first_window
+        created = 0
+        legacy = 0
+        with self.connect() as db:
+            for user_id in user_ids:
+                if db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is None:
+                    raise NotFound("user not found")
+                active = db.execute(
+                    """SELECT cycle_id FROM billing_cycles
+                       WHERE user_id=? AND status='active' ORDER BY created_at DESC LIMIT 1""",
+                    (user_id,),
+                ).fetchone()
+                if active:
+                    db.execute(
+                        """UPDATE billing_cycles
+                           SET cycle_key='legacy-pre-baseline', cycle_kind='legacy_pre_baseline',
+                               timezone=?, policy_id='legacy', commercial_applies=0, baseline_at=?,
+                               ends_at=?
+                           WHERE cycle_id=?""",
+                        (CUSTOMER_CYCLE_TIMEZONE, baseline, baseline, active[0]),
+                    )
+                    legacy += 1
+                else:
+                    legacy_id = f"cyc_{uuid.uuid4().hex}"
+                    db.execute(
+                        """INSERT INTO billing_cycles(
+                               cycle_id,user_id,cycle_key,starts_at,ends_at,status,created_at,
+                               cycle_kind,timezone,policy_id,commercial_applies,baseline_at
+                           ) VALUES (?,?,?,?,?,'active',?,?,?,?,?,?)""",
+                        (legacy_id, user_id, "legacy-pre-baseline", None, baseline, utc_now(),
+                         "legacy_pre_baseline", CUSTOMER_CYCLE_TIMEZONE, "legacy", 0, baseline),
+                    )
+                    legacy += 1
+                row = db.execute(
+                    "SELECT cycle_id FROM billing_cycles WHERE user_id=? AND cycle_key=?",
+                    (user_id, first_key),
+                ).fetchone()
+                if row is None:
+                    cycle_id = f"cyc_{uuid.uuid4().hex}"
+                    db.execute(
+                        """INSERT INTO billing_cycles(
+                               cycle_id,user_id,cycle_key,starts_at,ends_at,status,created_at,
+                               cycle_kind,timezone,policy_id,commercial_applies,baseline_at
+                           ) VALUES (?,?,?,?,?,'scheduled',?,?,?,?,?,?)""",
+                        (cycle_id, user_id, first_key, first_start, first_end, utc_now(),
+                         "customer", CUSTOMER_CYCLE_TIMEZONE, CUSTOMER_CYCLE_POLICY_ID, 1, baseline),
+                    )
+                    created += 1
+        return {"users": len(user_ids), "legacy_marked": legacy, "scheduled_created": created}
 
     def set_entitlement(self, user_id: str, pool_id: str, plan: str,
                         allowance_bytes: int | None, effective_from: str | None = None) -> str:
@@ -354,9 +743,12 @@ class ControlPlane:
         return entitlement_id
 
     def add_credential(self, node_id: str, runtime_ref_hash: str, runtime_family: str,
-                       protocol: str, user_id: str | None = None) -> str:
+                       protocol: str, user_id: str | None = None,
+                       credential_kind: str = "managed") -> str:
         if len(runtime_ref_hash) != 64 or any(c not in "0123456789abcdef" for c in runtime_ref_hash.lower()):
             raise ControlPlaneError("runtime_ref_hash must be a SHA-256 hex string")
+        if credential_kind not in {"legacy", "managed", "standby"}:
+            raise ControlPlaneError("invalid credential kind")
         credential_id = f"cred_{uuid.uuid4().hex}"
         with self.connect() as db:
             if db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
@@ -365,9 +757,10 @@ class ControlPlane:
                 raise NotFound("user not found")
             db.execute(
                 """INSERT INTO credentials
-                   (credential_id,node_id,user_id,runtime_ref_hash,runtime_family,protocol,status,created_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (credential_id, node_id, user_id, runtime_ref_hash.lower(), runtime_family, protocol, "active", utc_now()),
+                   (credential_id,node_id,user_id,runtime_ref_hash,runtime_family,protocol,credential_kind,status,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (credential_id, node_id, user_id, runtime_ref_hash.lower(), runtime_family, protocol,
+                 credential_kind, "active", utc_now()),
             )
         return credential_id
 
@@ -382,8 +775,8 @@ class ControlPlane:
     def set_coverage(self, node_id: str, source: str, status: str, detail: str, observed_at: str | None = None) -> str:
         if status not in {"available", "gap", "stale", "unknown"}:
             raise ControlPlaneError("invalid coverage status")
-        sample_time = observed_at or utc_now()
-        if parse_time(sample_time) is None:
+        sample_time = normalize_time(observed_at) if observed_at else utc_now()
+        if sample_time is None:
             raise ControlPlaneError("observed_at must be ISO-8601")
         coverage_id = f"cov_{uuid.uuid4().hex}"
         with self.connect() as db:
@@ -405,26 +798,47 @@ class ControlPlane:
         return row[0] if row else None
 
     def _cycle_for(self, db: sqlite3.Connection, user_id: str, observed_at: str) -> str | None:
+        normalized = normalize_time(observed_at)
+        if normalized is None:
+            return None
+        customer_window = customer_cycle_window(normalized)
+        if customer_window is not None:
+            return self._ensure_customer_cycle(db, user_id, normalized)
         row = db.execute(
             """SELECT cycle_id FROM billing_cycles
-               WHERE user_id=? AND status='active'
+               WHERE user_id=? AND cycle_kind IN ('legacy_pre_baseline','manual')
                  AND (starts_at IS NULL OR starts_at <= ?)
                  AND (ends_at IS NULL OR ends_at > ?)
                ORDER BY created_at DESC LIMIT 1""",
-            (user_id, observed_at, observed_at),
+            (user_id, normalized, normalized),
         ).fetchone()
         return row[0] if row else None
+
+    def _current_cycle(self, db: sqlite3.Connection, user_id: str) -> sqlite3.Row | None:
+        now = utc_now()
+        window = customer_cycle_window(now)
+        if window is not None:
+            cycle_id = self._ensure_customer_cycle(db, user_id, now)
+            return db.execute(
+                "SELECT * FROM billing_cycles WHERE cycle_id=?", (cycle_id,)
+            ).fetchone()
+        return db.execute(
+            """SELECT * FROM billing_cycles
+               WHERE user_id=? AND cycle_kind IN ('legacy_pre_baseline','manual') AND status='active'
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_id,),
+        ).fetchone()
 
     def ingest_observations(self, node_id: str, source: str, counter_epoch: str,
                             observations: list[dict], observed_at: str | None = None) -> dict:
         if not observations:
             raise ControlPlaneError("observations must not be empty")
-        sample_time = observed_at or utc_now()
+        sample_time = normalize_time(observed_at) if observed_at else utc_now()
         if not source.strip():
             raise ControlPlaneError("source must not be empty")
         if not counter_epoch.strip():
             raise ControlPlaneError("counter_epoch must not be empty")
-        if parse_time(sample_time) is None:
+        if sample_time is None:
             raise ControlPlaneError("observed_at must be ISO-8601")
         inserted = 0
         duplicates = 0
@@ -433,15 +847,22 @@ class ControlPlane:
             if db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
                 raise NotFound("node not found")
             for item in observations:
+                if not isinstance(item, dict):
+                    raise ControlPlaneError("observation is invalid")
+                if "uplink_bytes" not in item or "downlink_bytes" not in item:
+                    raise ControlPlaneError("observation counters are incomplete")
                 runtime_hash = str(item.get("runtime_ref_hash", "")).lower()
-                if len(runtime_hash) != 64:
+                if len(runtime_hash) != 64 or any(c not in "0123456789abcdef" for c in runtime_hash):
                     raise ControlPlaneError("observation runtime_ref_hash is invalid")
-                up = int(item.get("uplink_bytes", 0))
-                down = int(item.get("downlink_bytes", 0))
+                up = item["uplink_bytes"]
+                down = item["downlink_bytes"]
+                if (isinstance(up, bool) or not isinstance(up, int)
+                        or isinstance(down, bool) or not isinstance(down, int)):
+                    raise ControlPlaneError("observation counters are invalid")
                 if up < 0 or down < 0:
                     raise ControlPlaneError("counters cannot be negative")
-                item_time = str(item.get("observed_at") or sample_time)
-                if parse_time(item_time) is None:
+                item_time = normalize_time(str(item.get("observed_at"))) if item.get("observed_at") else sample_time
+                if item_time is None:
                     raise ControlPlaneError("observation observed_at must be ISO-8601")
                 oid = str(item.get("observation_id") or hashlib.sha256(
                     f"{node_id}|{runtime_hash}|{counter_epoch}|{item_time}|{source}".encode()
@@ -585,14 +1006,15 @@ class ControlPlane:
     def user_view(self, token: str) -> dict:
         user = self._user_by_token(token)
         with self.connect() as db:
-            cycle = db.execute(
-                "SELECT * FROM billing_cycles WHERE user_id=? AND status='active' ORDER BY created_at DESC LIMIT 1",
-                (user["user_id"],),
-            ).fetchone()
+            cycle = self._current_cycle(db, user["user_id"])
             cycle_id = cycle["cycle_id"] if cycle else None
             cycle_view = {
                 "cycle_id": cycle["cycle_id"], "cycle_key": cycle["cycle_key"],
-                "starts_at": cycle["starts_at"], "ends_at": cycle["ends_at"]
+                "starts_at": cycle["starts_at"], "ends_at": cycle["ends_at"],
+                "cycle_kind": cycle["cycle_kind"], "timezone": cycle["timezone"],
+                "policy_id": cycle["policy_id"],
+                "commercial_applies": bool(cycle["commercial_applies"]),
+                "baseline_at": cycle["baseline_at"],
             } if cycle else None
             pools = []
             unknown_pool = False
@@ -667,7 +1089,12 @@ class ControlPlane:
                         (user["user_id"], pool_id, cycle_id, *relevant_nodes),
                     ).fetchone()
                     used = int(row[0])
-                allowance = int(allowance_row[0]) if allowance_row and allowance_row[0] is not None else None
+                allowance = (
+                    int(allowance_row[0])
+                    if cycle and bool(cycle["commercial_applies"])
+                    and allowance_row and allowance_row[0] is not None
+                    else None
+                )
                 remaining = allowance - used if allowance is not None and used is not None else None
                 if not_applicable:
                     used = 0
@@ -691,27 +1118,29 @@ class ControlPlane:
                    WHERE user_id=? ORDER BY requested_at DESC LIMIT 1""", (user["user_id"],)
             ).fetchone()
             subscription_count = db.execute(
-                "SELECT COUNT(*) FROM subscription_entries WHERE user_id=? AND enabled=1 AND protocol!='anytls'",
+                """SELECT COUNT(*) FROM subscription_entries
+                   WHERE user_id=? AND enabled=1 AND projection_status='current' AND protocol!='anytls'""",
                 (user["user_id"],),
             ).fetchone()[0]
         return {
             "user_id": user["user_id"],
             "display_name": user["display_name"],
+            "role": user["role"],
             "plan": user["plan"],
             "subscription_status": "available" if subscription_count else "not_configured",
-            "subscription_url": f"{self.subscription_base_url}/u/{token}" if subscription_count else None,
+            "subscription_url": f"{self.subscription_base_url}/u/{user['subscription_token']}",
             "customer_billing_cycle": cycle_view,
             "pools": pools,
             "total_usage_bytes": total,
             "latest_upgrade_request": dict(upgrade) if upgrade else None,
         }
 
-    def subscription(self, token: str) -> str:
-        user = self._user_by_token(token)
+    def subscription(self, token: str, token_kind: str = "portal") -> str:
+        user = self._user_by_subscription_token(token) if token_kind == "subscription" else self._user_by_token(token)
         with self.connect() as db:
             rows = db.execute(
                 """SELECT uri FROM subscription_entries
-                   WHERE user_id=? AND enabled=1 AND protocol!='anytls'
+                   WHERE user_id=? AND enabled=1 AND projection_status='current' AND protocol!='anytls'
                    AND ? >= CASE minimum_plan WHEN 'Free' THEN 0 WHEN 'Basic' THEN 1 ELSE 2 END
                    ORDER BY entry_id""",
                 (user["user_id"], PLAN_ORDER[user["plan"]]),
@@ -751,11 +1180,15 @@ class ControlPlane:
             )
 
     def add_subscription_entry(self, user_id: str, node_id: str | None, pool_id: str | None,
-                               protocol: str, uri: str, minimum_plan: str = "Free") -> str:
+                               protocol: str, uri: str, minimum_plan: str = "Free",
+                               credential_id: str | None = None,
+                               projection_status: str = "current") -> str:
         if protocol.lower() == "anytls" or uri.lower().startswith("anytls://"):
             raise Conflict("AnyTLS is deferred until reliable per-user accounting")
         if minimum_plan not in PLAN_ORDER:
             raise ControlPlaneError("invalid minimum plan")
+        if projection_status not in {"current", "staged", "legacy", "retired"}:
+            raise ControlPlaneError("invalid subscription projection status")
         entry_id = f"sub_{uuid.uuid4().hex}"
         with self.connect() as db:
             if db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is None:
@@ -764,11 +1197,21 @@ class ControlPlane:
                 raise NotFound("node not found")
             if pool_id and pool_id not in POOL_NAMES:
                 raise ControlPlaneError("invalid pool")
+            if credential_id:
+                credential = db.execute(
+                    "SELECT user_id,node_id,protocol FROM credentials WHERE credential_id=?",
+                    (credential_id,),
+                ).fetchone()
+                if (credential is None or credential[0] != user_id
+                        or credential[1] != node_id or credential[2] != protocol):
+                    raise ControlPlaneError("subscription credential does not match entry")
             db.execute(
                 """INSERT INTO subscription_entries
-                   (entry_id,user_id,node_id,pool_id,protocol,uri,minimum_plan,enabled,created_at)
-                   VALUES (?,?,?,?,?,?,?,1,?)""",
-                (entry_id, user_id, node_id, pool_id, protocol, uri.strip(), minimum_plan, utc_now()),
+                   (entry_id,user_id,node_id,pool_id,credential_id,protocol,uri,minimum_plan,
+                    projection_status,enabled,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
+                (entry_id, user_id, node_id, pool_id, credential_id, protocol, uri.strip(), minimum_plan,
+                 projection_status, utc_now()),
             )
         return entry_id
 
@@ -796,7 +1239,7 @@ class ControlPlane:
                     "coverage_age_seconds": self._coverage_age_seconds(coverage),
                 })
             users = []
-            for row in db.execute("SELECT user_id,display_name,plan,status FROM users ORDER BY user_id"):
+            for row in db.execute("SELECT user_id,display_name,plan,role,status FROM users ORDER BY user_id"):
                 by_pool = {
                     p["pool_id"]: int(p["bytes"])
                     for p in db.execute(
@@ -807,6 +1250,19 @@ class ControlPlane:
                 }
                 users.append({**dict(row), "usage_by_pool_bytes": by_pool,
                               "usage_bytes": sum(by_pool.values())})
+            resources = [dict(row) for row in db.execute(
+                """SELECT resource_id,provider_name,provider_instance_id,node_id,location,network_label,
+                          asn,public_ipv4,cpu_cores,memory_gib,disk_gib,bandwidth_limit,transfer_limit,
+                          local_timezone,timezone_source,contract_cycle,contract_amount,contract_currency,
+                          next_due_local,next_due_timezone,next_due_source,resource_cycle_status,
+                          resource_cycle_source
+                   FROM infrastructure_resources ORDER BY resource_id"""
+            )]
+            provider_cycles = [dict(row) for row in db.execute(
+                """SELECT provider_cycle_id,resource_id,cycle_key,starts_at,ends_at,timezone,status,
+                          source,traffic_reset_authoritative
+                   FROM provider_resource_cycles ORDER BY resource_id,cycle_key"""
+            )]
             unresolved = db.execute(
                 "SELECT COUNT(*) FROM usage_ledger WHERE attribution_status!='attributed'"
             ).fetchone()[0]
@@ -819,6 +1275,14 @@ class ControlPlane:
         return {
             "nodes": nodes,
             "users": users,
+            "customer_cycle_policy": {
+                "policy_id": CUSTOMER_CYCLE_POLICY_ID,
+                "timezone": CUSTOMER_CYCLE_TIMEZONE,
+                "baseline_at": customer_cycle_baseline_utc(),
+                "rule": "15T00:00 to next 15T00",
+            },
+            "infrastructure_resources": resources,
+            "provider_resource_cycles": provider_cycles,
             "unresolved_usage_records": int(unresolved),
             "unresolved_credentials": int(unresolved_credentials),
             "pending_upgrade_requests": int(pending),
@@ -882,13 +1346,19 @@ class App:
             if path.startswith("/subscription/") or path.startswith("/u/"):
                 token = unquote(path.split("/", 2)[2])
                 if path.startswith("/u/") and method == "GET":
-                    body = self.control.subscription(token).encode()
+                    body = self.control.subscription(token, token_kind="subscription").encode()
                     return self._reply(start_response, 200, body, "text/plain; charset=utf-8")
                 if path.startswith("/subscription/") and method == "GET":
-                    body = self.control.subscription(token).encode()
+                    body = self.control.subscription(token, token_kind="subscription").encode()
                     return self._reply(start_response, 200, body, "text/plain; charset=utf-8")
             if path == "/subscription" and method == "GET":
-                body = self.control.subscription(self._bearer(environ)).encode()
+                subscription_token = environ.get("HTTP_X_SPARKLINK_SUBSCRIPTION_TOKEN")
+                if subscription_token:
+                    body = self.control.subscription(
+                        subscription_token, token_kind="subscription"
+                    ).encode()
+                else:
+                    body = self.control.subscription(self._bearer(environ)).encode()
                 return self._reply(start_response, 200, body, "text/plain; charset=utf-8")
             if path == "/api/me" and method == "GET":
                 return self._reply(start_response, 200, json_bytes(self.control.user_view(self._bearer(environ))))
@@ -921,6 +1391,7 @@ class App:
                 value = self.control.add_subscription_entry(
                     str(body["user_id"]), body.get("node_id"), body.get("pool_id"),
                     str(body["protocol"]), str(body["uri"]), str(body.get("minimum_plan", "Free")),
+                    body.get("credential_id"), str(body.get("projection_status", "current")),
                 )
                 return self._reply(start_response, 201, json_bytes({"entry_id": value}))
             return self._reply(start_response, 404, json_bytes({"error": "not found"}))

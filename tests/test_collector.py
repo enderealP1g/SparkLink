@@ -92,6 +92,48 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(payload["observed_at"], "2026-09-01T00:00:00.123456Z")
         self.assertEqual(value["status"], "ingested")
 
+    def test_partial_counter_direction_is_gap_and_never_zero_filled(self):
+        result = {
+            "ok": True,
+            "counter_epoch": "epoch-a",
+            "observed_at": "2026-09-01T00:00:00Z",
+            "observations": [{
+                "runtime_ref_hash": "c" * 64,
+                "uplink_bytes": 12,
+            }],
+        }
+        with patch.object(collector, "remote_stats", return_value=result), \
+                patch.object(collector, "post_json") as post, \
+                patch.object(collector, "post_coverage", return_value={}) as coverage:
+            value = collector.collect_node("https://control.example.test", "admin", self.config["nodes"][0])
+
+        self.assertEqual(value["status"], "gap")
+        self.assertEqual(value["reason"], "partial_per_user_counters")
+        post.assert_not_called()
+        coverage.assert_called_once_with(
+            "https://control.example.test", "admin", "node-a", "gap", "partial_per_user_counters"
+        )
+
+    def test_duplicate_runtime_ref_is_gap_and_not_double_counted(self):
+        result = {
+            "ok": True,
+            "counter_epoch": "epoch-a",
+            "observed_at": "2026-09-01T00:00:00Z",
+            "observations": [
+                {"runtime_ref_hash": "d" * 64, "uplink_bytes": 1, "downlink_bytes": 2},
+                {"runtime_ref_hash": "d" * 64, "uplink_bytes": 3, "downlink_bytes": 4},
+            ],
+        }
+        with patch.object(collector, "remote_stats", return_value=result), \
+                patch.object(collector, "post_json") as post, \
+                patch.object(collector, "post_coverage", return_value={}) as coverage:
+            value = collector.collect_node("https://control.example.test", "admin", self.config["nodes"][0])
+
+        self.assertEqual(value["status"], "gap")
+        self.assertEqual(value["reason"], "duplicate_runtime_ref")
+        post.assert_not_called()
+        coverage.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

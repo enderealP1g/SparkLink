@@ -2,9 +2,9 @@
  * SparkLink edge boundary.
  *
  * Configure CONTROL_PLANE_ORIGIN as the private origin URL exposed through a
- * hostname-scoped, Strict-TLS route. The Worker intentionally keeps User
- * tokens out of the upstream path and forwards them as an Authorization
- * header for subscription delivery.
+ * hostname-scoped, Strict-TLS route. The Worker intentionally keeps
+ * Subscription tokens out of the upstream path and forwards them as an
+ * internal subscription-token header.
  */
 
 const NO_STORE = {
@@ -23,7 +23,10 @@ async function forward(request, env, path, token = null) {
   origin.pathname = `/sparklink-mvp${path}`;
   origin.search = new URL(request.url).search;
   const headers = new Headers(request.headers);
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (token) {
+    headers.delete("Authorization");
+    headers.set("X-SparkLink-Subscription-Token", token);
+  }
   const upstream = new Request(origin, { method: request.method, headers, body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body });
   return withNoStore(await fetch(upstream, { cf: { cacheTtl: 0, cacheEverything: false } }));
 }

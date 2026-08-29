@@ -19,6 +19,7 @@ Production MVP 已有 Xray read-only Stats API 与 append-preserving Usage ledge
 - Windows admin secret 以 `LocalMachine` DPAPI 加密文件保存，并由 ACL 限定为当前 operations account 可读；secret 明文只在 collector process memory 中短暂存在。
 - One-shot collector 保留为 manual operations fallback。单个 Node 的 SSH、Stats API 或 ingest failure 只写入 `coverage gap` 并继续其他 Node；不将 failure、empty source 或 unobservable bytes 记为 zero。
 - `counter_epoch` 由 Node boot/process context 组成。same-epoch counter decrease 只生成 reset/non-monotonic ledger record，不产生负数；process epoch 变化不会删除历史 ledger。重复 observation 必须 idempotent；observation conflict 返回 conflict；late observation 不重新计算既有后续 delta。
+- Collector 只接受形状完整且每个 runtime identity 恰好包含 uplink/downlink 的 per-user counter rows；partial、malformed 或 duplicate runtime rows 形成 coverage gap，不以缺失方向补写 synthetic zero。对于由 `x-ui` 管理的 Node，epoch discovery 可以回退到实际 `xray-linux-amd64` process；无法确认 process identity 时不得 ingest。
 - `coverage` 按 configured freshness window（默认 900 秒）解释；过期的 `available` 在 User/Admin view 中呈现为 `stale`/`unknown`，而不是继续宣称当前可用。
 - Collector、Control Plane 和 coverage state 都位于 management/metering plane，不能成为 Xray、Nginx、WireProxy 或其他 proxy forwarding path 的 inline dependency。
 

@@ -65,3 +65,35 @@
 - 早期 task run 使用 `AppData` secret path 时因该 scheduler context 读取不到文件而失败；identity probe 证实同一 context 可读取 repository runtime path。临时 probe 已清理，旧 failure log 未被伪装为成功。
 - QQG Control Plane hardening deployment 保留 `/var/backups/sparklink-control-plane/hardening-20260829T062550Z/sparklink_control_plane.py` rollback file；restart 后 health、Xray/Nginx/WireProxy/Control Plane services 与既有 listeners 保持通过。未修改 RackNerd、DediRock、VMISS proxy data plane。
 - Local regression suite 最终为 `17 tests` passed，`compileall` passed；PowerShell deployment scripts parse successfully。Automatic collector 与 one-shot fallback 均通过独立 command path 验证。
+
+## Production Identity, Subscription & Cycle Reconciliation — discovery
+
+- Product Owner 已明确 `Customer Cycle` 使用 `Asia/Shanghai`，policy baseline 为 `2026-09-15 00:00`，周期为每月 15 日至次月 15 日；2026-09-15 之前的历史 Usage 必须保留并标记 `legacy/pre-baseline`，不得进入新商业周期 enforcement。
+- 对 `sparklink-node-166`、`la9929`、`racknerd-admin`、`dedirock-admin` 的只读 timezone discovery 均返回 `Etc/UTC`。因此 Provider Resource Cycle 的 timezone 必须记录为已验证的 instance local timezone `Etc/UTC`；洛杉矶/纽约是 location metadata，不得替代实际 host timezone。
+- QQG live SQLite 当前有 1 个 active User（旧手工 Plus migration）、1 个 `manual-ops-current` active cycle、8 条已登记 Credential、现有 VLESS subscription entries，以及 291 条 observations/ledger rows 和 97 条 coverage events。后续 reconciliation 必须保留这些历史记录，不重建或清空数据库。
+- 当前 live DB 中已有的 8 条 Credential 仍指向旧手工 User 或 standby/unresolved 状态；六用户正式 identity migration 尚未开始。不能从现有 UUID、subscription entry 或 traffic 自动推导 User ownership。
+- 一次通过 PowerShell `Write-Output` 管道传送只读 inventory script 时出现 `base64: invalid input`，但 remote process 仍输出了可解析 inventory；该传输方式不作为后续 mutation/evidence channel，后续使用短命令或可靠 stdin transport。
+
+## Production Hardening revalidation — 2026-08-29
+
+### AnyTLS and Xray Stats evidence correction
+
+- 早期 temporary Xray probe 使用 `curl --noproxy *`，导致 HTTP 204 不是经过 temporary SOCKS/VLESS path；该结果不作为 traffic evidence。修正为清除 inherited HTTP/SOCKS proxy environment、保留显式 SOCKS proxy 后，server access log 确认收到 `www.google.com:443` VLESS request，Xray `StatsService` 返回 synthetic user 的 uplink/downlink counters。
+- 同一 corrected boundary 下，QQG `hypro02` real managed User 的 loopback VLESS transfer 成功；两次 collector ingest 形成 `baseline + delta`，ledger 增量 `4,414` bytes。该 evidence 支持 Xray Stats observation surface，不改变 AnyTLS 的 Deferred 结论。
+
+### Collector/ledger hardening
+
+- Collector 现在拒绝缺少任一 direction、malformed counter、duplicate runtime row 或缺失 process epoch 的 source response；拒绝结果只写 coverage gap，不发送 observation、不把缺失方向补成 zero。
+- `counter_epoch` discovery 对 `xray` systemd unit 使用实际 MainPID；RackNerd/VMISS 的 Xray 由 `x-ui` 管理时回退读取实际 `xray-linux-amd64` process。三 Node 当前 source query 均可返回稳定 epoch；RackNerd/VMISS 当前没有 counter rows，因此 runtime result 为 `unknown`，不是 `0`。
+- local regression suite 当前 `30 tests` passed，覆盖 same-epoch reset、new epoch/restart boundary、duplicate/conflict、out-of-order、partial failure、partial counters、malformed numeric counters、empty source、stale coverage、cycle boundary、timestamp validation 与 Control Plane incomplete-counter rejection。
+
+### Automatic collector current state
+
+- Windows `SparkLink-Metering-Collector` 使用 PowerShell launcher 管理 SSH tunnel 与 Python interval process；Python 从 protected DPAPI path 解密 admin secret。Task 当前 `Running`，连续 interval 为 `1 ingested`（`hypro02`）、`2 unknown`（RackNerd/VMISS）、`0 failed`。
+- Task stop 会由 Windows 留下 child SSH process；launcher 的下一次 startup cleanup 只匹配自身固定 forward/host，已验证 stop/start 后没有残留 matching tunnel 阻塞 recovery。非 matching listener 仍按 blocker 处理，不被自动清理。
+- QQG Xray、Nginx、`sparklink-wireproxy`、Control Plane 与 expected listeners 的 read-only check 通过；collector changes 未修改 proxy data-plane configuration。
+
+### Identity/cycle reconciliation current state
+
+- 六个 stable User、managed/legacy Credential mapping、独立 Subscription token、Customer Billing Cycle 与 Provider Resource Cycle metadata 已完成 live reconciliation；具体脱敏证据见 `docs/operations/2026-08-29_PRODUCTION_IDENTITY_CYCLE_RECONCILIATION.md`。
+- `Customer Billing Cycle` 继续使用 `Asia/Shanghai` 15→15；四个 host instance local timezone 以 read-only evidence 记录为 `Etc/UTC`。provider traffic reset authority 仍 Unknown，不由 Next Due 或 location 推断。

@@ -20,17 +20,17 @@ if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
     throw 'protected collector secret is missing; provision it outside Git before installation'
 }
 
-$collectorPath = Join-Path $RepositoryRoot 'src\sparklink_xray_collector.py'
-if (-not (Test-Path -LiteralPath $collectorPath -PathType Leaf)) {
-    throw 'collector source is missing'
+$launcherPath = Join-Path $RepositoryRoot 'deploy\sparklink-collector-run.ps1'
+if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+    throw 'collector launcher is missing'
 }
 
-$python = (Get-Command python.exe -ErrorAction Stop).Source
 $configPath = Join-Path $RepositoryRoot 'config\sparklink.example.json'
 $logPath = Join-Path $env:LOCALAPPDATA 'SparkLink\logs\collector.log'
-$actionArguments = '"{0}" --config "{1}" --secret-path "{2}" --control-plane-ssh-host "{3}" --control-plane-forward-port {4} --interval-seconds {5} --log-path "{6}"' -f `
-    $collectorPath, $configPath, $secretPath, $ControlPlaneSshHost, $ControlPlaneForwardPort, $IntervalSeconds, $logPath
-$action = New-ScheduledTaskAction -Execute $python -Argument $actionArguments -WorkingDirectory $RepositoryRoot
+$powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+$actionArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -RepositoryRoot "{1}" -SecretPath "{2}" -ControlPlaneSshHost "{3}" -ControlPlaneForwardPort {4} -IntervalSeconds {5} -LogPath "{6}"' -f `
+    $launcherPath, $RepositoryRoot, $secretPath, $ControlPlaneSshHost, $ControlPlaneForwardPort, $IntervalSeconds, $logPath
+$action = New-ScheduledTaskAction -Execute $powerShell -Argument $actionArguments -WorkingDirectory $RepositoryRoot
 $userId = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
 $settings = New-ScheduledTaskSettingsSet `

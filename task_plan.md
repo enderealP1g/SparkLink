@@ -40,3 +40,25 @@
 - AnyTLS 只有在真实隔离 traffic evidence 能完成 `Credential → User → Node → Resource Pool → Usage` attribution 后，才可提出 promotion；否则记录 `Deferred pending reliable metering`。
 - Collector failure、unknown/unobservable usage、远端 node partial failure 均不得被表示为可信的 `0`，也不得影响 proxy data plane。
 - 不把 current Candidate Architecture Proposal 直接升级为已批准 To-Be Architecture；实现选择必须保持最小、可审计、可回滚。
+
+## Production Identity, Subscription & Cycle Reconciliation — 2026-08-29
+
+- [x] C0 — 将 Production Hardening checkpoint `ae1259f` push 到 `origin/main`。
+- [x] C1 — 实现并测试 `Customer Cycle` 与 `Provider Resource Cycle` 的独立模型、timezone 和 legacy/pre-baseline semantics。
+- [x] C2 — 完成六个真实 User 的 stable identity、role、Plan/Entitlement 和独立 token/subscription projection reconciliation。
+- [x] C3 — 以 legacy coexistence、config test、reload/restart、isolated client 和 real traffic evidence 完成 Xray/VLESS Credential migration。
+- [x] C4 — 部署、回归测试并验证 `Credential → User → Node → Resource Pool → Usage → Customer Cycle`，记录 provider metadata/unknowns 和 rollback point。
+
+### Cycle constraints
+
+- `Customer Cycle` 固定以 `Asia/Shanghai` 的 `2026-09-15 00:00` 为统一 policy baseline，周期为每月 15 日 00:00 至次月 15 日 00:00。
+- `Provider Resource Cycle` 使用各实例已验证的 local timezone；provider contract/financial cadence 与 traffic reset authority 分开记录。
+- 2026-09-15 之前的 Usage 只标记为 `legacy/pre-baseline`，不删除、清零、重写或纳入新 commercial cycle enforcement。
+- 不从付款日期、购买日期、套餐描述或 Next Due 推断 provider traffic reset。
+
+## Current hardening checkpoint
+
+- Xray Stats probe 已修正为真正经过 SOCKS/VLESS 的 isolated transfer；QQG real managed User 产生 `baseline + delta`，不是绕过 proxy 的 false positive。
+- Automatic collector 已切换为 PowerShell launcher + Python interval process；startup cleanup 只处理本 task 的 stale SSH forward，当前 task running。
+- 当前 coverage 为 `hypro02=ingested`、RackNerd/VMISS=`Unknown`（source reachable but no current per-user rows），不把 unknown 记为 zero。
+- AnyTLS 保持 `Deferred pending reliable metering`；Candidate Architecture 仍是 Proposal。

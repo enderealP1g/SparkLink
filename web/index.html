@@ -44,7 +44,7 @@
       const data = await r.json();
       if (!r.ok) { alert(data.error || 'Unable to load'); return; }
       q('login').hidden = true; q('user').hidden = false;
-      q('identity').textContent = `${data.display_name} (${data.user_id})`;
+      q('identity').textContent = `${data.display_name} (${data.user_id}) · ${data.role}`;
       q('plan').textContent = data.plan; q('subscription').textContent = data.subscription_status;
       q('cycle').textContent = data.customer_billing_cycle ? (data.customer_billing_cycle.cycle_key || 'configured') : 'Unknown / Needs Configuration';
       q('total').textContent = bytes(data.total_usage_bytes);

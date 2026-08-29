@@ -43,15 +43,32 @@ def process_epoch():
         capture_output=True,text=True,timeout=10,
     )
     pid=pid_result.stdout.strip() if pid_result.returncode == 0 else 'unknown'
+    if not pid.isdigit() or pid == '0':
+        for candidate in sorted(os.listdir('/proc')):
+            if not candidate.isdigit():
+                continue
+            try:
+                raw_cmdline=open('/proc/'+candidate+'/cmdline','rb').read().split(b'\0')
+                executable=os.path.basename(raw_cmdline[0].decode(errors='replace')) if raw_cmdline else ''
+            except OSError:
+                continue
+            if executable.startswith('xray'):
+                pid=candidate
+                break
     start='unknown'
     if pid.isdigit() and pid != '0' and os.path.exists('/proc/'+pid+'/stat'):
         raw=open('/proc/'+pid+'/stat').read()
         fields=raw.rsplit(')',1)[1].strip().split()
         if len(fields) >= 20:
             start=fields[19]
+    if boot == 'unknown' or pid in ('unknown', '0') or start == 'unknown':
+        return None
     return h(boot+'|'+pid+'|'+start)
 
 epoch_before=process_epoch()
+if not epoch_before:
+    print(json.dumps({'ok':False,'error':'counter_epoch_unavailable'},separators=(',',':')))
+    raise SystemExit(0)
 for exe in ['/usr/local/x-ui/bin/xray-linux-amd64','/usr/local/bin/xray','/usr/bin/xray']:
     if not os.path.exists(exe):
         continue
@@ -67,24 +84,43 @@ for exe in ['/usr/local/x-ui/bin/xray-linux-amd64','/usr/local/bin/xray','/usr/b
     except Exception:
         print(json.dumps({'ok':False,'error':'stats_response_invalid'},separators=(',',':')))
         raise SystemExit(0)
+    if not isinstance(obj,dict) or not isinstance(obj.get('stat',[]),list):
+        print(json.dumps({'ok':False,'error':'stats_response_invalid'},separators=(',',':')))
+        raise SystemExit(0)
     epoch_after=process_epoch()
-    if epoch_before != epoch_after:
+    if not epoch_after or epoch_before != epoch_after:
         print(json.dumps({'ok':False,'error':'counter_epoch_changed_during_query'},separators=(',',':')))
         raise SystemExit(0)
-    totals={}
+    metrics={}
     for item in obj.get('stat',[]):
-        parts=item.get('name','').split('>>>')
-        if len(parts) < 3:
-            continue
+        if not isinstance(item,dict) or not isinstance(item.get('name'),str):
+            print(json.dumps({'ok':False,'error':'stats_shape_invalid'},separators=(',',':')))
+            raise SystemExit(0)
+        parts=item['name'].split('>>>')
+        if len(parts) != 4 or parts[0] != 'user' or parts[2] != 'traffic' or not parts[1]:
+            print(json.dumps({'ok':False,'error':'stats_shape_invalid'},separators=(',',':')))
+            raise SystemExit(0)
         ref=parts[1]
-        metric=parts[-1]
-        if metric not in ('uplink','downlink'):
-            continue
-        row=totals.setdefault(h(ref),{'runtime_ref_hash':h(ref),'uplink_bytes':0,'downlink_bytes':0})
-        row[metric+'_bytes']=int(item.get('value',0))
+        metric=parts[3]
+        if metric not in ('uplink','downlink') or ref in metrics and metric in metrics[ref]:
+            print(json.dumps({'ok':False,'error':'stats_shape_invalid'},separators=(',',':')))
+            raise SystemExit(0)
+        value=item.get('value')
+        if isinstance(value,bool) or not isinstance(value,int):
+            print(json.dumps({'ok':False,'error':'stats_value_invalid'},separators=(',',':')))
+            raise SystemExit(0)
+        if value < 0:
+            print(json.dumps({'ok':False,'error':'stats_value_invalid'},separators=(',',':')))
+            raise SystemExit(0)
+        metrics.setdefault(ref,{})[metric]=value
+    if any(set(values) != {'uplink','downlink'} for values in metrics.values()):
+        print(json.dumps({'ok':False,'error':'partial_per_user_counters'},separators=(',',':')))
+        raise SystemExit(0)
+    totals=[{'runtime_ref_hash':h(ref),'uplink_bytes':values['uplink'],'downlink_bytes':values['downlink']}
+            for ref,values in metrics.items()]
     now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
     print(json.dumps({'ok':True,'counter_epoch':epoch_after,'observed_at':now,
-                      'observations':list(totals.values())},separators=(',',':')))
+                      'observations':totals},separators=(',',':')))
     raise SystemExit(0)
 print(json.dumps({'ok':False,'error':'xray_binary_not_found'},separators=(',',':')))
 '''
@@ -243,6 +279,40 @@ def _safe_error(exc: Exception) -> str:
     return exc.__class__.__name__.lower()
 
 
+def validate_remote_observations(observations: object) -> list[dict]:
+    """Reject partial or ambiguous counter rows before any ingest call."""
+    if not isinstance(observations, list):
+        raise CollectorError("remote_observations_invalid")
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for item in observations:
+        if not isinstance(item, dict):
+            raise CollectorError("remote_observation_invalid")
+        required = {"runtime_ref_hash", "uplink_bytes", "downlink_bytes"}
+        if not required.issubset(item):
+            raise CollectorError("partial_per_user_counters")
+        runtime_hash = str(item["runtime_ref_hash"]).lower()
+        if (len(runtime_hash) != 64
+                or any(c not in "0123456789abcdef" for c in runtime_hash)):
+            raise CollectorError("remote_runtime_ref_invalid")
+        if runtime_hash in seen:
+            raise CollectorError("duplicate_runtime_ref")
+        seen.add(runtime_hash)
+        uplink = item["uplink_bytes"]
+        downlink = item["downlink_bytes"]
+        if (isinstance(uplink, bool) or not isinstance(uplink, int)
+                or isinstance(downlink, bool) or not isinstance(downlink, int)):
+            raise CollectorError("remote_counter_invalid")
+        if uplink < 0 or downlink < 0:
+            raise CollectorError("remote_counter_invalid")
+        normalized.append({
+            "runtime_ref_hash": runtime_hash,
+            "uplink_bytes": uplink,
+            "downlink_bytes": downlink,
+        })
+    return normalized
+
+
 def collect_node(endpoint: str, admin_token: str, node: dict) -> dict:
     node_id = str(node["node_id"])
     try:
@@ -256,9 +326,8 @@ def collect_node(endpoint: str, admin_token: str, node: dict) -> dict:
                         "coverage_recorded": False}
             return {"node_id": node_id, "status": "gap", "reason": reason,
                     "coverage_recorded": True}
-        if not isinstance(result.get("observations"), list):
-            raise CollectorError("remote_observations_invalid")
-        if not result["observations"]:
+        observations = validate_remote_observations(result.get("observations"))
+        if not observations:
             detail = "StatsService reachable but no per-user counters returned; usage is not treated as zero"
             try:
                 post_coverage(endpoint, admin_token, node_id, "unknown", detail)
@@ -267,12 +336,15 @@ def collect_node(endpoint: str, admin_token: str, node: dict) -> dict:
                         "coverage_recorded": False}
             return {"node_id": node_id, "status": "unknown", "reason": "no_per_user_counters",
                     "coverage_recorded": True}
+        counter_epoch = str(result.get("counter_epoch") or "").strip()
+        if not counter_epoch:
+            raise CollectorError("counter_epoch_missing")
         payload = {
             "node_id": node_id,
             "source": "xray-stats-api",
-            "counter_epoch": str(result["counter_epoch"]),
+            "counter_epoch": counter_epoch,
             "observed_at": str(result.get("observed_at") or utc_now()),
-            "observations": result["observations"],
+            "observations": observations,
         }
         response = post_json(endpoint, admin_token, payload)
         return {"node_id": node_id, "status": "ingested", **response}

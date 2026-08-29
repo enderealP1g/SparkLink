@@ -51,7 +51,7 @@ usage_observations (raw, append-preserving)
 ## Runtime observation
 
 - RackNerd、VMISS：读取 verified loopback Xray Stats API；`x-ui client_traffics` 只作为 recovery/reconciliation source，不与 Stats API counters 直接相加。
-- `hypro02`：纳入前必须确认或以可回滚方式启用 loopback-only Xray Stats API；Stats API failure 不能影响 Xray serving。
+- `hypro02`：当前已验证 loopback-only Xray Stats API；Stats API failure 不能影响 Xray serving。post-identity 当前没有 counter rows 时显示 coverage `Unknown`，不补成 zero。
 - DediRock：继续记录 per-user statistics coverage gap；不使用整机或 Nginx totals 伪造 User Usage。
 - Windows automatic `collector service` 通过 SSH read-only query 获取 counters，哈希 runtime identity 后向 Control Plane ingest；one-shot `manual collector` 保留为 fallback。SSH private keys 只留在 Windows protected runtime location。
 - AnyTLS、provider resource cycle 和 future adapters 通过独立 capability/status 表示，不自动获得 Customer Usage authority。
@@ -63,7 +63,7 @@ usage_observations (raw, append-preserving)
 1. 从各 Node read-only 读取技术身份，建立 `Credential` record 和 `runtime_ref_hash`；不把 UUID、password 或完整 URI 写入 repository。
 2. 由 Admin 明确确认现实 User mapping、Plan、Entitlement 和 billing cycle；无法确认的 credential 保持 `Unresolved / Needs Mapping`，不会被自动分配到 User。
 
-当前已从旧 operations context 验证 Credential-to-runtime identity 的可行性；现实 User 合并、Plan assignment 和 upgrade effective time 仍由 Admin/manual fallback 管理。
+当前已完成已知 production User 的 stable identity、Plan/Entitlement 与 Xray/VLESS Credential mapping reconciliation；allowance、upgrade effective time 与无法确认的 credential 仍由 Admin/manual fallback 管理。
 
 ## Subscription flow
 

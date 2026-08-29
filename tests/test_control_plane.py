@@ -6,7 +6,16 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.sparklink_control_plane import App, Conflict, ControlPlane, ControlPlaneError
+from src.sparklink_control_plane import (
+    App,
+    Conflict,
+    ControlPlane,
+    ControlPlaneError,
+    CUSTOMER_CYCLE_BASELINE,
+    CUSTOMER_CYCLE_POLICY_ID,
+    Unauthorized,
+    customer_cycle_window,
+)
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -120,6 +129,71 @@ class ControlPlaneTests(unittest.TestCase):
             db.close()
         self.assertEqual(details, ["out_of_order_observation", "baseline", "delta"])
 
+    def test_new_counter_epoch_starts_baseline_and_preserves_previous_ledger(self):
+        runtime = "9" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        self.cp.ingest_observations(
+            "hypro02", "test", "process-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 100, "downlink_bytes": 200}],
+            "2026-09-02T00:00:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "process-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 150, "downlink_bytes": 260}],
+            "2026-09-02T00:01:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "process-2",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 7, "downlink_bytes": 11}],
+            "2026-09-02T00:02:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "process-2",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 17, "downlink_bytes": 31}],
+            "2026-09-02T00:03:00Z",
+        )
+        view = self.cp.user_view(self.user["portal_token"])
+        premium = next(p for p in view["pools"] if p["pool_id"] == "PREMIUM")
+        self.assertEqual(premium["used_bytes"], 140)
+        db = self.cp.connect()
+        try:
+            rows = db.execute(
+                "SELECT o.counter_epoch,l.detail,l.delta_uplink_bytes,l.delta_downlink_bytes "
+                "FROM usage_ledger l JOIN usage_observations o ON o.observation_id=l.observation_id "
+                "ORDER BY l.observed_at"
+            ).fetchall()
+        finally:
+            db.close()
+        self.assertEqual(
+            [(row[0], row[1], row[2], row[3]) for row in rows],
+            [("process-1", "baseline", 0, 0),
+             ("process-1", "delta", 50, 60),
+             ("process-2", "baseline", 0, 0),
+             ("process-2", "delta", 10, 20)],
+        )
+
+    def test_repeated_counter_observation_has_zero_delta_without_zeroing_history(self):
+        runtime = "8" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 10, "downlink_bytes": 20}],
+            "2026-09-02T00:00:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 15, "downlink_bytes": 25}],
+            "2026-09-02T00:01:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 15, "downlink_bytes": 25}],
+            "2026-09-02T00:02:00Z",
+        )
+        view = self.cp.user_view(self.user["portal_token"])
+        premium = next(p for p in view["pools"] if p["pool_id"] == "PREMIUM")
+        self.assertEqual(premium["used_bytes"], 10)
+
     def test_stale_coverage_is_not_reported_as_available(self):
         runtime = "e" * 64
         self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
@@ -145,6 +219,145 @@ class ControlPlaneTests(unittest.TestCase):
                 [{"runtime_ref_hash": runtime, "uplink_bytes": 1, "downlink_bytes": 1}],
                 "2026-09-02T00:00:00",
             )
+
+    def test_incomplete_counter_is_rejected_without_zero_fill(self):
+        runtime = "7" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        with self.assertRaises(ControlPlaneError):
+            self.cp.ingest_observations(
+                "hypro02", "test", "epoch-1",
+                [{"runtime_ref_hash": runtime, "uplink_bytes": 12}],
+                "2026-09-02T00:00:00Z",
+            )
+        db = self.cp.connect()
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM usage_observations").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0], 0)
+        finally:
+            db.close()
+
+    def test_fractional_counter_is_rejected_without_truncation(self):
+        runtime = "6" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        with self.assertRaises(ControlPlaneError):
+            self.cp.ingest_observations(
+                "hypro02", "test", "epoch-1",
+                [{"runtime_ref_hash": runtime, "uplink_bytes": 12.5, "downlink_bytes": 3}],
+                "2026-09-02T00:00:00Z",
+            )
+        db = self.cp.connect()
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM usage_observations").fetchone()[0], 0)
+        finally:
+            db.close()
+
+    def test_customer_cycle_uses_asia_shanghai_15th_boundary(self):
+        self.assertIsNone(customer_cycle_window("2026-09-14T15:59:59Z"))
+        window = customer_cycle_window("2026-09-14T16:00:00Z")
+        self.assertEqual(window, (
+            "2026-09-15",
+            "2026-09-14T16:00:00Z",
+            "2026-10-14T16:00:00Z",
+            CUSTOMER_CYCLE_POLICY_ID,
+        ))
+        self.assertEqual(CUSTOMER_CYCLE_BASELINE.isoformat(), "2026-09-15T00:00:00+08:00")
+
+    def test_customer_cycle_reconciliation_preserves_legacy_usage(self):
+        result = self.cp.reconcile_customer_cycles(["usr_test"])
+        self.assertEqual(result["scheduled_created"], 1)
+        runtime = "2" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 100, "downlink_bytes": 100}],
+            "2026-09-14T15:00:00Z",
+        )
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 150, "downlink_bytes": 150}],
+            "2026-09-14T16:00:00Z",
+        )
+        db = self.cp.connect()
+        try:
+            cycles = db.execute(
+                "SELECT cycle_key,starts_at,ends_at,cycle_kind,timezone,commercial_applies FROM billing_cycles WHERE user_id='usr_test' ORDER BY cycle_key"
+            ).fetchall()
+            ledger = db.execute(
+                "SELECT cycle_id,delta_uplink_bytes,delta_downlink_bytes FROM usage_ledger ORDER BY observed_at"
+            ).fetchall()
+        finally:
+            db.close()
+        self.assertEqual(len(cycles), 2)
+        scheduled = next(row for row in cycles if row[0] == "2026-09-15")
+        self.assertEqual(tuple(scheduled[1:]), (
+            "2026-09-14T16:00:00Z", "2026-10-14T16:00:00Z", "customer", "Asia/Shanghai", 1
+        ))
+        self.assertEqual(len(ledger), 2)
+        self.assertNotEqual(ledger[0][0], ledger[1][0])
+        self.assertEqual((ledger[0][1], ledger[0][2]), (0, 0))
+        self.assertEqual((ledger[1][1], ledger[1][2]), (50, 50))
+
+    def test_subscription_token_is_separate_from_portal_token(self):
+        self.assertNotEqual(self.user["portal_token"], self.user["subscription_token"])
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
+        body = self.cp.subscription(self.user["subscription_token"], token_kind="subscription")
+        self.assertTrue(body)
+        view = self.cp.user_view(self.user["portal_token"])
+        self.assertIn(self.user["subscription_token"], view["subscription_url"])
+        self.assertNotIn(self.user["portal_token"], view["subscription_url"])
+        with self.assertRaises(Unauthorized):
+            self.cp.subscription(self.user["portal_token"], token_kind="subscription")
+
+    def test_user_view_exposes_role_and_independent_url_without_configured_entries(self):
+        user = self.cp.reconcile_user("usr_free", "liuwen", "Free")
+        view = self.cp.user_view(user["portal_token"])
+        self.assertEqual(view["role"], "CUSTOMER")
+        self.assertEqual(view["subscription_status"], "not_configured")
+        self.assertIn(user["subscription_token"], view["subscription_url"])
+
+    def test_subscription_credential_must_belong_to_same_user(self):
+        other = self.cp.reconcile_user("usr_other", "other", "Plus")
+        credential = self.cp.add_credential("hypro02", "6" * 64, "xray", "vless", "usr_other")
+        with self.assertRaises(ControlPlaneError):
+            self.cp.add_subscription_entry(
+                "usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic",
+                credential_id=credential,
+            )
+
+    def test_provider_resource_cycle_is_separate_metadata(self):
+        self.cp.upsert_infrastructure_resource({
+            "resource_id": "qqgnet-la-9929",
+            "provider_name": "QQGNet",
+            "provider_instance_id": "qqgnet-la-9929",
+            "node_id": "hypro02",
+            "location": "Los Angeles",
+            "network_label": "AS9929",
+            "local_timezone": "Etc/UTC",
+            "timezone_source": "verified host OS discovery",
+            "resource_cycle_status": "unknown",
+            "resource_cycle_source": "not verified",
+            "contract_cycle": "annual",
+            "contract_amount": "$28.90",
+            "contract_currency": "USD",
+            "next_due_local": "2027-08-28 17:30:00",
+            "next_due_timezone": "Unknown",
+            "next_due_source": "Product Owner supplied metadata",
+        })
+        self.cp.record_provider_resource_cycle({
+            "provider_cycle_id": "prc_qqg_unknown",
+            "resource_id": "qqgnet-la-9929",
+            "cycle_key": "unknown-unverified",
+            "timezone": "Etc/UTC",
+            "status": "unknown",
+            "source": "not verified",
+        })
+        overview = self.cp.admin_overview()
+        resource = overview["infrastructure_resources"][0]
+        provider_cycle = overview["provider_resource_cycles"][0]
+        self.assertEqual(resource["local_timezone"], "Etc/UTC")
+        self.assertEqual(resource["resource_cycle_status"], "unknown")
+        self.assertEqual(provider_cycle["timezone"], "Etc/UTC")
+        self.assertFalse(provider_cycle["traffic_reset_authoritative"])
 
     def test_unmapped_usage_is_not_zero(self):
         runtime = "b" * 64
@@ -201,6 +414,31 @@ class ControlPlaneTests(unittest.TestCase):
             "REQUEST_METHOD": "GET",
             "PATH_INFO": "/subscription",
             "HTTP_AUTHORIZATION": f"Bearer {self.user['portal_token']}",
+            "wsgi.input": io.BytesIO(),
+            "wsgi.errors": io.StringIO(),
+            "wsgi.version": (1, 0),
+            "wsgi.url_scheme": "http",
+            "wsgi.multithread": False,
+            "wsgi.multiprocess": False,
+            "wsgi.run_once": False,
+        }
+        result = {}
+
+        def start_response(status, headers):
+            result["status"] = status
+            result["headers"] = headers
+
+        body = b"".join(app(environ, start_response))
+        self.assertEqual(result["status"], "200 OK")
+        self.assertEqual(base64.b64decode(body.strip()).decode(), "vless://synthetic\n")
+
+    def test_worker_subscription_header_uses_independent_subscription_token(self):
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic", "Plus")
+        app = App(self.cp)
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": "/subscription",
+            "HTTP_X_SPARKLINK_SUBSCRIPTION_TOKEN": self.user["subscription_token"],
             "wsgi.input": io.BytesIO(),
             "wsgi.errors": io.StringIO(),
             "wsgi.version": (1, 0),

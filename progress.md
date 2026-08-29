@@ -30,3 +30,18 @@
 - H3 已完成：automatic collector 使用 Windows `Task Scheduler` 作为 OS supervisor，Python interval loop 通过 SSH read-only pull 与 loopback tunnel 连接 QQG；one-shot collector 保留为 manual fallback，不引入 product scheduler。
 - H4 已完成：repository ignored runtime 的 `LocalMachine DPAPI` secret 修正了 Task Scheduler 的 `AppData` 读取边界；interactive one-shot 与自动 task 连续两个 interval 均完成 3/3 Nodes ingest、`failed=0`。QQG Control Plane hardening backup、health/service/listener retest 通过，production proxy data plane 未修改。
 - H1–H4 完成后的结论：AnyTLS 继续 `Deferred pending reliable metering`；Xray automatic collection 为正常路径，manual collection 为 fallback。
+
+## 2026-08-29 — Production Identity, Subscription & Cycle Reconciliation
+
+- Product Owner 裁决已读取；Production Hardening commit `ae1259f09dd6e039184fd1e56ec9f44e142c5ad9` 已 push 到 `origin/main`。
+- Cycle discovery 完成：Customer Cycle 固定 `Asia/Shanghai` 15→15，自 `2026-09-15 00:00` 生效；四个 VPS 的实际 OS timezone 只读验证均为 `Etc/UTC`，Provider Resource Cycle 不按用户 timezone 或地理位置推断。
+- Live DB reconciliation baseline 已取得：1 个旧手工 User、1 个 legacy-like active cycle、8 条 credentials；下一步保留历史 Usage，先实现 cycle model 和六用户 identity migration 的本地 tests。
+
+## 2026-08-29 — Hardening revalidation and identity/cycle completion
+
+- AnyTLS investigation remains `Deferred pending reliable metering`；official installed `sing-box 1.13.16` 未替换，隔离 custom build evidence 已保留在 dated operations record。
+- 修正 isolated Xray Stats probe 的测试代理绕过问题：移除 `curl --noproxy *`，改为清除环境代理后保留 SOCKS；QQG `hypro02` real managed User 的 VLESS transfer 经 server log、Stats API 与 ledger `baseline + delta` 三方核对。
+- 加固 collector remote parser：每个 runtime identity 必须同时有 uplink/downlink；partial、malformed、duplicate rows 或无法确认 Xray process epoch 均形成 coverage gap，不补 synthetic zero。兼容 `x-ui` 管理的 `xray-linux-amd64` process。
+- Windows automatic collector 改由 `sparklink-collector-run.ps1` 负责 tunnel/process supervision，protected secret 由 Python 通过 `--secret-path` 解密，不通过 wrapper environment 传递；startup cleanup 仅匹配本 task 的固定 SSH forward。
+- 当前 live automatic interval 可重复得到 `1 ingested / 2 unknown / 0 failed`：`hypro02` 有 per-user counters，RackNerd/VMISS StatsService 可达但 identity migration 后没有当前 counter rows；Unknown 不表示 zero。task stop/start 已验证无残留 matching SSH tunnel 阻塞下一次启动。
+- `30 tests`、`compileall` 与 PowerShell parse checks 通过；Control Plane 入口也已拒绝 incomplete/fractional counter，避免缺失方向或截断值被补成可信 Usage。identity/cycle reconciliation 的 canonical ADR 与 operations record 已补齐。下一步为最终 secret scan、diff review、live service recheck 与本地 commit checkpoint。

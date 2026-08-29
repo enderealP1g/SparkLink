@@ -49,7 +49,7 @@ Control Plane 与 proxy data plane 通过独立 process、独立 local port、�
 - 第一版只发行已完成 per-user attribution 的 Xray/VLESS paths；AnyTLS 保持 installed/standby capability，但在 reliable accounting 前不进入 production Subscription。
 - `V2rayN` / `V2rayNG` compatible Base64 subscription 是 Must；Clash Deferred。
 - Portal 只允许创建 upgrade request；downgrade 不支持。涉及 proration、立即生效时间或 allowance 变化的请求进入 `manual-admin review`，系统不自行发明计价规则。
-- 既有 `sub.enrpiglink.top` Worker 作为 delivery boundary 继续复用/演进；当前 Worker live state 未被假设为可用，未完成 control-plane credential reconciliation 前不声称 public cutover 已完成。
+- 既有 `sub.enrpiglink.top` Worker 作为 delivery boundary 继续复用/演进；当前 per-User subscription projection 通过受保护 origin 与 hostname-scoped Worker route 提供，Worker 不成为 proxy data plane 的 inline dependency。
 
 ### Capacity status
 
@@ -60,7 +60,7 @@ Control Plane 与 proxy data plane 通过独立 process、独立 local port、�
 - MVP 可以提供真实 User/Usage/Subscription 闭环，同时不需要 microservices、event bus、policy DSL 或 product scheduler。
 - One-shot manual collector、manual User/Credential mapping 和 manual upgrade review 是有意保留的 operational fallback；automatic collector 的 Windows OS supervisor 不是产品业务调度能力。
 - 若 Control Plane 或 metering unavailable，用户现有 proxy data plane 继续运行，但 usage freshness、coverage 或 subscription view 可以明确显示 unavailable。
-- `spark.enrpiglink.top` 与 `sub.enrpiglink.top` 的最终 public binding 仍需要受保护的 Cloudflare control-plane access；缺失时只能完成 local/QQG staging，不能伪造上线状态。
+- `spark.enrpiglink.top` 与 `sub.enrpiglink.top` 的 public binding 已在本次 MVP acceptance 中完成；后续 edge 变更仍需使用受保护的 Cloudflare control-plane access，并限定在已授权 hostname。
 
 ## Non-Decisions
 

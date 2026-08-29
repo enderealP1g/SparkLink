@@ -30,23 +30,21 @@ catch {
     # Startup logging must never prevent the collector from attempting to run.
 }
 
-function Read-ProtectedToken([string]$Path) {
-    Add-Type -AssemblyName System.Security
-    $protected = [Convert]::FromBase64String(([IO.File]::ReadAllText($Path)).Trim())
-    $plain = [Security.Cryptography.ProtectedData]::Unprotect(
-        $protected, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine
-    )
-    try {
-        return [Text.Encoding]::UTF8.GetString($plain)
-    }
-    finally {
-        [Array]::Clear($plain, 0, $plain.Length)
-    }
-}
-
 $exitCode = 1
 $tunnel = $null
-$adminToken = $null
+
+function Remove-StaleCollectorTunnel([int]$Port, [string]$SshHost) {
+    $needle = "-L 127.0.0.1:{0}:127.0.0.1:8080 {1}" -f $Port, $SshHost
+    $processes = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq 'ssh.exe' -and $_.CommandLine -and $_.CommandLine.Contains($needle)
+    }
+    foreach ($process in $processes) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($processes) {
+        Start-Sleep -Milliseconds 300
+    }
+}
 
 try {
     $collectorPath = Join-Path $RepositoryRoot 'src\sparklink_xray_collector.py'
@@ -60,10 +58,7 @@ try {
     $ssh = Get-Command ssh.exe -ErrorAction Stop
     $logDirectory = Split-Path -Parent $LogPath
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
-    $adminToken = Read-ProtectedToken $SecretPath
-    if ([string]::IsNullOrWhiteSpace($adminToken)) {
-        throw 'protected collector secret is empty'
-    }
+    Remove-StaleCollectorTunnel $ControlPlaneForwardPort $ControlPlaneSshHost
     $existingListener = Get-NetTCPConnection -LocalPort $ControlPlaneForwardPort -State Listen -ErrorAction SilentlyContinue
     if ($existingListener) {
         throw 'control-plane forward port is already in use'
@@ -92,8 +87,8 @@ try {
     if (-not $tunnelReady) {
         throw 'control-plane SSH tunnel did not become ready'
     }
-    $env:SPARKLINK_ADMIN_TOKEN = $adminToken
     & $python.Source $collectorPath --config (Join-Path $RepositoryRoot 'config\sparklink.example.json') `
+        --secret-path $SecretPath `
         --endpoint ("http://127.0.0.1:{0}" -f $ControlPlaneForwardPort) `
         --interval-seconds $IntervalSeconds 2>&1 | ForEach-Object {
             Add-Content -LiteralPath $LogPath -Value ([string]$_) -Encoding UTF8
@@ -115,8 +110,6 @@ catch {
     $exitCode = 1
 }
 finally {
-    $env:SPARKLINK_ADMIN_TOKEN = $null
-    $adminToken = $null
     if ($tunnel -and -not $tunnel.HasExited) {
         Stop-Process -Id $tunnel.Id -Force
         $tunnel.WaitForExit()
