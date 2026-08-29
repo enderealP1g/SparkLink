@@ -97,3 +97,20 @@
 
 - 六个 stable User、managed/legacy Credential mapping、独立 Subscription token、Customer Billing Cycle 与 Provider Resource Cycle metadata 已完成 live reconciliation；具体脱敏证据见 `docs/operations/2026-08-29_PRODUCTION_IDENTITY_CYCLE_RECONCILIATION.md`。
 - `Customer Billing Cycle` 继续使用 `Asia/Shanghai` 15→15；四个 host instance local timezone 以 read-only evidence 记录为 `Etc/UTC`。provider traffic reset authority 仍 Unknown，不由 Next Due 或 location 推断。
+
+## Production Operations Token Issuance & Delivery — discovery
+
+- Product Owner 已将当前 blocker 收敛为 Admin 无法安全领取/分发 User credentials；其它 Bug Hunt 在本阶段暂停。
+- 当前实现只对 Portal token 使用 `portal_token_hash`；`users.subscription_token` 仍是 plaintext column，`create_user`、`reconcile_user` 和 `_user_by_subscription_token` 直接读写 plaintext，违反当前 security boundary。
+- 当前 App 只有 User `/api/me`、Subscription delivery、Admin overview/coverage/ingest/entry endpoints；没有 Admin-only token issue/rotate/revoke endpoint 或一次性 Windows delivery writer。
+- `runtime/` 已被 `.gitignore` 忽略；现有 Admin secret 位于 ignored runtime 的 LocalMachine DPAPI file，适合作为 operator authentication input，但不能把新 User token 放入 collector log 或 repository tracked files。
+- 目标 workflow 必须在 Control Plane 端原子替换对应 token hash，并在 operator 端将一次性 plaintext bundle 写入 Windows protected `runtime/delivery`；API response、CLI stdout、HTTP access log 和 chat 均不得回显 token。
+- 当前 production code/doc snapshot 已声明六个 User 与一名 `OWNER`/`Plus`，但 stable root `user_id` 仍需从 live DB 以脱敏字段核对，不从历史 token bundle 或 URI 推断。
+
+## Production Operations Token Issuance & Delivery — resolved
+
+- Control Plane live migration 已完成：`users.subscription_token` legacy plaintext 列已移除，当前只保留 `portal_token_hash` 与 `subscription_token_hash`；foreign-key、health、业务计数和无 WAL/SHM 残留检查通过。
+- `deploy/issue_user_tokens.py` 已提供 Admin metadata list、Portal/Subscription/both issuance、立即 revoke、protected ignored bundle、显式 clipboard helper、bundle verification 和 owner acceptance verification；stdout 不含 token values。
+- root `usr_plus_manual_01` 当前为 `root` / `Plus` / `OWNER`；新的 Portal bundle 已通过真实 Portal UI 与安全 `/api/me` acceptance，当前 Subscription URL 未 rotate 且迁移后仍可用。
+- wrong Portal、old Portal、Portal-as-Subscription、wrong Subscription、Subscription-as-Portal 均在 live path 被拒绝。六个 User 的 metadata list 已验证，其他五个 User 没有被自动 rotate。
+- 迁移前 legacy DB rollback copies 已在 acceptance 后清理；保留的 post-migration DB snapshot 为 hash-only。下一阶段可恢复原 Bug Hunt，但任何新 credential issuance 仍必须走该 operator workflow。

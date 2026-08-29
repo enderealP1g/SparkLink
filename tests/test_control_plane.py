@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from src.sparklink_control_plane import (
     CUSTOMER_CYCLE_POLICY_ID,
     Unauthorized,
     customer_cycle_window,
+    token_hash,
 )
 
 
@@ -303,8 +305,7 @@ class ControlPlaneTests(unittest.TestCase):
         body = self.cp.subscription(self.user["subscription_token"], token_kind="subscription")
         self.assertTrue(body)
         view = self.cp.user_view(self.user["portal_token"])
-        self.assertIn(self.user["subscription_token"], view["subscription_url"])
-        self.assertNotIn(self.user["portal_token"], view["subscription_url"])
+        self.assertIsNone(view["subscription_url"])
         with self.assertRaises(Unauthorized):
             self.cp.subscription(self.user["portal_token"], token_kind="subscription")
 
@@ -313,7 +314,117 @@ class ControlPlaneTests(unittest.TestCase):
         view = self.cp.user_view(user["portal_token"])
         self.assertEqual(view["role"], "CUSTOMER")
         self.assertEqual(view["subscription_status"], "not_configured")
-        self.assertIn(user["subscription_token"], view["subscription_url"])
+        self.assertIsNone(view["subscription_url"])
+
+    def test_user_tokens_are_hash_only_at_rest(self):
+        db = self.cp.connect()
+        try:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+            row = db.execute(
+                "SELECT portal_token_hash,subscription_token_hash FROM users WHERE user_id='usr_test'"
+            ).fetchone()
+        finally:
+            db.close()
+        self.assertIn("portal_token_hash", columns)
+        self.assertIn("subscription_token_hash", columns)
+        self.assertNotIn("subscription_token", columns)
+        self.assertEqual(row[0], token_hash(self.user["portal_token"]))
+        self.assertEqual(row[1], token_hash(self.user["subscription_token"]))
+        raw = self.db.read_bytes()
+        self.assertNotIn(self.user["portal_token"].encode(), raw)
+        self.assertNotIn(self.user["subscription_token"].encode(), raw)
+
+    def test_legacy_plaintext_subscription_column_is_migrated_and_removed(self):
+        legacy_db = Path(self.temp.name) / "legacy.sqlite"
+        connection = sqlite3.connect(legacy_db)
+        try:
+            connection.execute(
+                """CREATE TABLE users(
+                   user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+                   plan TEXT NOT NULL, status TEXT NOT NULL,
+                   portal_token_hash TEXT NOT NULL UNIQUE,
+                   subscription_token TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "INSERT INTO users VALUES (?,?,?,?,?,?,?)",
+                ("usr_legacy", "legacy", "Plus", "active", "p" * 64, "legacy-sub-secret", "2026-01-01T00:00:00Z"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        cp = ControlPlane(legacy_db, subscription_base_url="https://sub.example.test")
+        cp.init_db()
+        db = cp.connect()
+        try:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+            row = db.execute(
+                "SELECT subscription_token_hash FROM users WHERE user_id='usr_legacy'"
+            ).fetchone()
+        finally:
+            db.close()
+        self.assertNotIn("subscription_token", columns)
+        self.assertIn("subscription_token_hash", columns)
+        self.assertEqual(row[0], token_hash("legacy-sub-secret"))
+        self.assertNotIn(b"legacy-sub-secret", legacy_db.read_bytes())
+        self.assertEqual(cp._user_by_subscription_token("legacy-sub-secret")["user_id"], "usr_legacy")
+
+    def test_token_issuance_replaces_hash_and_rejects_old_and_wrong_portal_tokens(self):
+        old_portal = self.user["portal_token"]
+        result = self.cp.issue_tokens("usr_test", "portal")
+        new_portal = result["tokens"]["portal"]
+        self.assertNotEqual(old_portal, new_portal)
+        self.assertEqual(result["token_kind"], "portal")
+        self.assertEqual(self.cp.user_view(new_portal)["user_id"], "usr_test")
+        with self.assertRaises(Unauthorized):
+            self.cp.user_view(old_portal)
+        with self.assertRaises(Unauthorized):
+            self.cp.user_view("wrong-token")
+        self.assertEqual(self.cp._user_by_subscription_token(self.user["subscription_token"])["user_id"], "usr_test")
+        db = self.cp.connect()
+        try:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+        finally:
+            db.close()
+        self.assertNotIn("subscription_token", columns)
+        self.assertNotIn(new_portal.encode(), self.db.read_bytes())
+
+    def test_token_issuance_requires_admin_and_api_returns_no_unrequested_kind(self):
+        app = App(self.cp)
+        body = json.dumps({"user_id": "usr_test", "token_kind": "portal", "revoke_old": True}).encode()
+
+        def call(admin_token):
+            environ = {
+                "REQUEST_METHOD": "POST", "PATH_INFO": "/api/admin/token-issuance",
+                "HTTP_AUTHORIZATION": f"Bearer {admin_token}",
+                "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body),
+                "wsgi.errors": io.StringIO(), "wsgi.version": (1, 0),
+                "wsgi.url_scheme": "http", "wsgi.multithread": False,
+                "wsgi.multiprocess": False, "wsgi.run_once": False,
+            }
+            result = {}
+
+            def start_response(status, headers):
+                result["status"] = status
+                result["headers"] = headers
+
+            response = b"".join(app(environ, start_response))
+            return result["status"], json.loads(response)
+
+        status, rejected = call("not-admin")
+        self.assertEqual(status, "401 Error")
+        self.assertNotIn("tokens", rejected)
+        status, issued = call("admin")
+        self.assertEqual(status, "201 OK")
+        self.assertEqual(set(issued["tokens"]), {"portal"})
+        self.assertNotIn("subscription_token", json.dumps(issued))
+
+    def test_subscription_and_portal_tokens_cannot_cross_authentication_boundaries(self):
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
+        with self.assertRaises(Unauthorized):
+            self.cp.user_view(self.user["subscription_token"])
+        with self.assertRaises(Unauthorized):
+            self.cp.subscription(self.user["portal_token"])
 
     def test_subscription_credential_must_belong_to_same_user(self):
         other = self.cp.reconcile_user("usr_other", "other", "Plus")
@@ -404,10 +515,10 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_subscription_is_v2ray_base64_and_no_anytls(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic", "Plus")
-        body = base64.b64decode(self.cp.subscription(self.user["portal_token"]).strip()).decode()
+        body = base64.b64decode(self.cp.subscription(self.user["subscription_token"]).strip()).decode()
         self.assertEqual(body, "vless://synthetic\n")
 
-    def test_bearer_subscription_endpoint_is_supported_by_control_plane(self):
+    def test_bearer_subscription_endpoint_is_rejected_by_control_plane(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic", "Plus")
         app = App(self.cp)
         environ = {
@@ -429,8 +540,8 @@ class ControlPlaneTests(unittest.TestCase):
             result["headers"] = headers
 
         body = b"".join(app(environ, start_response))
-        self.assertEqual(result["status"], "200 OK")
-        self.assertEqual(base64.b64decode(body.strip()).decode(), "vless://synthetic\n")
+        self.assertEqual(result["status"], "401 Error")
+        self.assertEqual(json.loads(body)["error"], "subscription token required")
 
     def test_worker_subscription_header_uses_independent_subscription_token(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic", "Plus")

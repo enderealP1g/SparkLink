@@ -35,7 +35,7 @@ Control Plane 是独立 process，不是 Xray、Nginx 或 WireProxy 的 inline d
 - QQG 上的 `sparklink-control-plane.service` 已启用并监听 `127.0.0.1:8080`。
 - QQG runtime verified 为 Xray `26.7.28`、Nginx `1.24.0`、WireProxy `1.1.3`；sing-box `1.13.16` 保持 stopped/standby。
 - QQG Xray `StatsService` 仅绑定 `127.0.0.1:62789`；Xray 443、CDN WebSocket 10080、Nginx 和 WireProxy listeners 保持可用。
-- SQLite database 位于受保护的 runtime directory；admin token、User portal token 和 subscription URI 不进入 Git。
+- SQLite database 位于受保护的 runtime directory；`users` 只保存 Portal/Subscription token hash，plaintext 只通过受保护 operator delivery bundle 短暂存在，不进入 Git、日志或 operations docs。
 - 当前采用 manual User/Credential migration。User allowance 仍未裁决，因此 Portal 显示为 unknown/未配置而不是虚构数值。
 - 当前已完成六个 stable `User` 的 identity reconciliation；legacy runtime credentials 保留历史映射，managed Xray/VLESS credentials 作为后续 subscription projection 的 source mapping。历史 Usage 未因 identity、Plan 或 cycle reconciliation 被重写。
 - 已登记的正式 subscription projection 只包含完成 mapping 的 Xray/VLESS entries：RackNerd Standard、VMISS Premium 和 hypro02 Premium；AnyTLS、DediRock reference path 与 CDN standby identities 未进入正式 User subscription。
@@ -50,7 +50,7 @@ Control Plane 是独立 process，不是 Xray、Nginx 或 WireProxy 的 inline d
 | Collector（initial vertical-slice snapshot） | RackNerd/VMISS/hypro02 两次采样均成功 ingest；RackNerd 的 unrelated unmapped observations 保持 unresolved，不污染当前 User view |
 | Automatic collector hardening（initial snapshot） | Windows `Task Scheduler` 通过 SSH tunnel 连接 QQG loopback Control Plane；protected runtime secret 修正后连续两个 interval 均为 3/3 Nodes ingest、`failed=0`，Task 保持 `Running`；post-identity current status 见下文 |
 | Usage | public edge acceptance 后，manual Plus User 的 `STANDARD` coverage 为 `available`、used 为 `0`；`PREMIUM` coverage 为 `available`、used 为 `1223310` bytes；total 为 `1223310` bytes；相对此前 `611798` checkpoint 增长 `611512` bytes |
-| HTTP origin | Nginx TLS path 的 Portal、Bearer `/api/me`、Bearer `/subscription` 均返回成功；subscription 为 6 行、全部 `vless` |
+| HTTP origin | Nginx TLS path 的 Portal Bearer `/api/me` 与独立 Subscription header `/subscription` 均返回成功；subscription 为 6 行、全部 `vless` |
 | Client paths | 公网 subscription response 解码为 6 条 `vless` entries；从其中派生的 isolated Xray client 实际启动两条 hypro02 Xray/VLESS REALITY path 并形成 non-zero Stats counters。两条 path 的 OpenAI/Anthropic 返回 `401`、Gemini `403`、Google AI `200`、Google `204`。此前 Gate B 的 Native policy-level `403` 负面 evidence 仍保留，不能被这些 no-key probes 覆盖。 |
 | Reboot | reboot 后历史 ledger 仍为 `611798` bytes；new counter epoch 重新可采集，未清零历史 Usage |
 
@@ -65,6 +65,12 @@ Wrangler 的 Custom Domain 方式因目标 hostname 已存在 externally managed
 同一公网 response 由全新 isolated v2rayN `7.18.0` 实例通过其 subscription updater 获取成功并生成 6 个 `VLESS/REALITY` profiles，其中包含 2 个 hypro02 profiles。该实例未启动本地代理服务，因为 `10808` 已被现有 live v2rayN 占用；实际外连验证由临时 isolated Xray client 完成，避免触碰 live client。
 
 Worker 只位于 management/subscription delivery boundary；QQG proxy listeners 和 `sparklink-control-plane` 保持独立，Worker/Portal failure 不成为现有 proxy data plane 的 inline dependency。
+
+## Token issuance and owner acceptance checkpoint
+
+2026-08-29 已补齐 Admin-only token issuance/rotation/delivery workflow，详细 runbook 见 [`2026-08-29_TOKEN_ISSUANCE_DELIVERY.md`](2026-08-29_TOKEN_ISSUANCE_DELIVERY.md)。Control Plane 已从 legacy `users.subscription_token` plaintext storage 迁移为 `portal_token_hash` + `subscription_token_hash`，并完成 schema、foreign-key、业务计数和 service health verification。
+
+root `usr_plus_manual_01` 的 Portal token 已通过受保护 Windows operator bundle 交付并完成真实 Portal acceptance：`root`、`Plus`、`OWNER`、`legacy-pre-baseline` Customer Cycle、`Asia/Shanghai` 以及独立 `STANDARD`/`PREMIUM` pool rows 均已从 live `/api/me` 与 Portal 页面复核；`/api/me` self-scope 通过。当前 root Subscription URL 未被 rotate，迁移后仍通过独立 Subscription path 验证。其它五个 User 未被自动 rotate；Admin metadata list 已确认六个 User 都可由同一 workflow 指定交付。
 
 ## Rollback points
 

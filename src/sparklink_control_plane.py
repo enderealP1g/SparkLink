@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'CUSTOMER',
     status TEXT NOT NULL,
     portal_token_hash TEXT NOT NULL UNIQUE,
-    subscription_token TEXT NOT NULL UNIQUE,
+    subscription_token_hash TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL
 );
 
@@ -345,11 +345,28 @@ class ControlPlane:
         self.coverage_max_age_seconds = configured_age
 
     @staticmethod
+    def _hash_only_users_schema(table_name: str) -> str:
+        if table_name != "users_hash_only":
+            raise ValueError("unexpected users migration table")
+        return """
+            CREATE TABLE users_hash_only (
+                user_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                plan TEXT NOT NULL CHECK(plan IN ('Free', 'Basic', 'Plus')),
+                role TEXT NOT NULL DEFAULT 'CUSTOMER',
+                status TEXT NOT NULL,
+                portal_token_hash TEXT NOT NULL UNIQUE,
+                subscription_token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+        """
+
+    @staticmethod
     def _migrate_schema(db: sqlite3.Connection) -> None:
         additions = {
             "users": {
                 "role": "TEXT NOT NULL DEFAULT 'CUSTOMER'",
-                "subscription_token": "TEXT",
+                "subscription_token_hash": "TEXT",
             },
             "billing_cycles": {
                 "cycle_kind": "TEXT NOT NULL DEFAULT 'legacy'",
@@ -370,18 +387,66 @@ class ControlPlane:
             for column, definition in columns.items():
                 if column not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        missing_tokens = db.execute(
-            "SELECT user_id FROM users WHERE subscription_token IS NULL OR subscription_token=''"
-        ).fetchall()
-        for row in missing_tokens:
+
+        user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+        if "subscription_token_hash" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN subscription_token_hash TEXT")
+            user_columns.add("subscription_token_hash")
+
+        # A pre-hardening database may still contain the legacy plaintext column.
+        # Hash any value that is present, generate an unreachable hash for a
+        # missing value, then rebuild the table so the plaintext column and its
+        # UNIQUE constraint cannot survive the migration.
+        legacy_column_present = "subscription_token" in user_columns
+        select_columns = "user_id,subscription_token_hash"
+        if legacy_column_present:
+            select_columns += ",subscription_token"
+        rows = db.execute(f"SELECT {select_columns} FROM users").fetchall()
+        for row in rows:
+            subscription_hash = row["subscription_token_hash"]
+            if not subscription_hash:
+                legacy_token = row["subscription_token"] if legacy_column_present else None
+                subscription_hash = token_hash(legacy_token) if legacy_token else token_hash(new_token())
+                db.execute(
+                    "UPDATE users SET subscription_token_hash=? WHERE user_id=?",
+                    (subscription_hash, row["user_id"]),
+                )
+
+        if legacy_column_present:
+            db.commit()
+            db.execute("PRAGMA foreign_keys = OFF")
+            try:
+                db.execute("BEGIN")
+                db.execute(ControlPlane._hash_only_users_schema("users_hash_only"))
+                db.execute(
+                    """INSERT INTO users_hash_only(
+                           user_id,display_name,plan,role,status,portal_token_hash,
+                           subscription_token_hash,created_at
+                       )
+                       SELECT user_id,display_name,plan,role,status,portal_token_hash,
+                              subscription_token_hash,created_at
+                       FROM users"""
+                )
+                db.execute("DROP TABLE users")
+                db.execute("ALTER TABLE users_hash_only RENAME TO users")
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.execute("PRAGMA foreign_keys = ON")
+            if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ControlPlaneError("users hash-only migration broke foreign keys")
+            # Rebuilding the table removes the column from the schema. VACUUM
+            # also removes old plaintext pages from the SQLite freelist.
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            db.execute("VACUUM")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        else:
             db.execute(
-                "UPDATE users SET subscription_token=? WHERE user_id=?",
-                (new_token(), row[0]),
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_subscription_token_hash "
+                "ON users(subscription_token_hash)"
             )
-        db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_subscription_token "
-            "ON users(subscription_token)"
-        )
 
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -531,36 +596,35 @@ class ControlPlane:
         with self.connect() as db:
             row = db.execute(
                 """SELECT * FROM users
-                   WHERE status='active' AND subscription_token=?""",
-                (token,),
+                   WHERE status='active' AND subscription_token_hash=?""",
+                (token_hash(token),),
             ).fetchone()
         if row is None:
             raise Unauthorized("invalid or revoked subscription token")
         return row
 
     def create_user(self, display_name: str, plan: str = "Free", user_id: str | None = None,
-                    portal_token: str | None = None, subscription_token: str | None = None,
                     role: str = "CUSTOMER") -> dict:
         if plan not in PLAN_ORDER:
             raise ControlPlaneError("invalid plan")
         if role not in {"CUSTOMER", "OWNER"}:
             raise ControlPlaneError("invalid user role")
         uid = user_id or f"usr_{uuid.uuid4().hex}"
-        token = portal_token or new_token()
-        sub_token = subscription_token or new_token()
+        token = new_token()
+        sub_token = new_token()
         now = utc_now()
         with self.connect() as db:
             db.execute(
                 """INSERT INTO users(
-                       user_id,display_name,plan,role,status,portal_token_hash,subscription_token,created_at
+                       user_id,display_name,plan,role,status,portal_token_hash,
+                       subscription_token_hash,created_at
                    ) VALUES (?,?,?,?,'active',?,?,?)""",
-                (uid, display_name, plan, role, token_hash(token), sub_token, now),
+                (uid, display_name, plan, role, token_hash(token), token_hash(sub_token), now),
             )
         return {"user_id": uid, "portal_token": token, "subscription_token": sub_token}
 
     def reconcile_user(self, user_id: str, display_name: str, plan: str,
-                       role: str = "CUSTOMER", portal_token: str | None = None,
-                       subscription_token: str | None = None) -> dict:
+                       role: str = "CUSTOMER") -> dict:
         """Create or reconcile current identity metadata without rewriting usage."""
         if plan not in PLAN_ORDER:
             raise ControlPlaneError("invalid plan")
@@ -569,25 +633,76 @@ class ControlPlane:
         with self.connect() as db:
             row = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
             if row is None:
-                token = portal_token or new_token()
-                sub_token = subscription_token or new_token()
+                token = new_token()
+                sub_token = new_token()
                 db.execute(
                     """INSERT INTO users(
-                           user_id,display_name,plan,role,status,portal_token_hash,subscription_token,created_at
+                           user_id,display_name,plan,role,status,portal_token_hash,
+                           subscription_token_hash,created_at
                        ) VALUES (?,?,?,?,'active',?,?,?)""",
-                    (user_id, display_name, plan, role, token_hash(token), sub_token, utc_now()),
+                    (user_id, display_name, plan, role, token_hash(token), token_hash(sub_token), utc_now()),
                 )
                 return {"user_id": user_id, "portal_token": token,
                         "subscription_token": sub_token, "created": True}
-            portal_hash = token_hash(portal_token) if portal_token is not None else row["portal_token_hash"]
-            current_sub_token = row["subscription_token"] or subscription_token or new_token()
             db.execute(
                 """UPDATE users SET display_name=?,plan=?,role=?,status='active',
-                          portal_token_hash=?,subscription_token=? WHERE user_id=?""",
-                (display_name, plan, role, portal_hash, current_sub_token, user_id),
+                          portal_token_hash=?,subscription_token_hash=? WHERE user_id=?""",
+                (display_name, plan, role, row["portal_token_hash"], row["subscription_token_hash"], user_id),
             )
-            return {"user_id": user_id, "portal_token": portal_token,
-                    "subscription_token": current_sub_token, "created": False}
+            # Existing plaintext is intentionally not recoverable through this
+            # reconciliation path. Use issue_tokens() to rotate and deliver it.
+            return {"user_id": user_id, "portal_token": None,
+                    "subscription_token": None, "created": False}
+
+    def issue_tokens(self, user_id: str, token_kind: str = "portal",
+                     revoke_old: bool = True) -> dict:
+        """Issue one or both user tokens and return plaintext exactly once.
+
+        The returned values are for the caller's protected delivery path only.
+        The database receives hashes, and replacing a hash immediately revokes
+        the previous token for that kind. Keeping old tokens active is not
+        supported by this minimal one-active-token-per-kind workflow.
+        """
+        if token_kind not in {"portal", "subscription", "both"}:
+            raise ControlPlaneError("invalid token kind")
+        if revoke_old is not True:
+            raise Conflict("token issuance must revoke the previous token")
+        kinds = ("portal", "subscription") if token_kind == "both" else (token_kind,)
+        columns = {"portal": "portal_token_hash", "subscription": "subscription_token_hash"}
+        issued = {kind: new_token() for kind in kinds}
+        with self.connect() as db:
+            user = db.execute(
+                "SELECT user_id,display_name,plan,role,status FROM users WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if user is None:
+                raise NotFound("user not found")
+            if user["status"] != "active":
+                raise Conflict("user is not active")
+            for kind, token in issued.items():
+                db.execute(
+                    f"UPDATE users SET {columns[kind]}=? WHERE user_id=?",
+                    (token_hash(token), user_id),
+                )
+        return {
+            "ok": True,
+            "user_id": user["user_id"],
+            "display_name": user["display_name"],
+            "plan": user["plan"],
+            "role": user["role"],
+            "token_kind": token_kind,
+            "issued_at": utc_now(),
+            "revoked_previous": True,
+            "tokens": issued,
+        }
+
+    def admin_users(self) -> list[dict]:
+        """Return non-secret user metadata for the Admin operator."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT user_id,display_name,plan,role,status FROM users ORDER BY user_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def create_cycle(self, user_id: str, cycle_key: str, starts_at: str | None, ends_at: str | None,
                      cycle_kind: str = "manual", cycle_timezone: str = CUSTOMER_CYCLE_TIMEZONE,
@@ -1128,15 +1243,20 @@ class ControlPlane:
             "role": user["role"],
             "plan": user["plan"],
             "subscription_status": "available" if subscription_count else "not_configured",
-            "subscription_url": f"{self.subscription_base_url}/u/{user['subscription_token']}",
+            # A hash-only Control Plane cannot reconstruct the current
+            # Subscription token. The URL is delivered out-of-band by the
+            # Admin operator and is intentionally absent from this response.
+            "subscription_url": None,
             "customer_billing_cycle": cycle_view,
             "pools": pools,
             "total_usage_bytes": total,
             "latest_upgrade_request": dict(upgrade) if upgrade else None,
         }
 
-    def subscription(self, token: str, token_kind: str = "portal") -> str:
-        user = self._user_by_subscription_token(token) if token_kind == "subscription" else self._user_by_token(token)
+    def subscription(self, token: str, token_kind: str = "subscription") -> str:
+        if token_kind != "subscription":
+            raise Unauthorized("subscription token required")
+        user = self._user_by_subscription_token(token)
         with self.connect() as db:
             rows = db.execute(
                 """SELECT uri FROM subscription_entries
@@ -1353,17 +1473,19 @@ class App:
                     return self._reply(start_response, 200, body, "text/plain; charset=utf-8")
             if path == "/subscription" and method == "GET":
                 subscription_token = environ.get("HTTP_X_SPARKLINK_SUBSCRIPTION_TOKEN")
-                if subscription_token:
-                    body = self.control.subscription(
-                        subscription_token, token_kind="subscription"
-                    ).encode()
-                else:
-                    body = self.control.subscription(self._bearer(environ)).encode()
+                if not subscription_token:
+                    raise Unauthorized("subscription token required")
+                body = self.control.subscription(
+                    subscription_token, token_kind="subscription"
+                ).encode()
                 return self._reply(start_response, 200, body, "text/plain; charset=utf-8")
             if path == "/api/me" and method == "GET":
                 return self._reply(start_response, 200, json_bytes(self.control.user_view(self._bearer(environ))))
             if path == "/api/me/subscription" and method == "GET":
-                body = self.control.subscription(self._bearer(environ)).encode()
+                subscription_token = environ.get("HTTP_X_SPARKLINK_SUBSCRIPTION_TOKEN")
+                if not subscription_token:
+                    raise Unauthorized("subscription token required")
+                body = self.control.subscription(subscription_token, token_kind="subscription").encode()
                 return self._reply(start_response, 200, body, "text/plain; charset=utf-8")
             if path == "/api/me/upgrade" and method == "POST":
                 body = self._read_json(environ)
@@ -1372,6 +1494,17 @@ class App:
             if path == "/api/admin/overview" and method == "GET":
                 self.control._require_admin(self._bearer(environ))
                 return self._reply(start_response, 200, json_bytes(self.control.admin_overview()))
+            if path == "/api/admin/users" and method == "GET":
+                self.control._require_admin(self._bearer(environ))
+                return self._reply(start_response, 200, json_bytes({"users": self.control.admin_users()}))
+            if path == "/api/admin/token-issuance" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.issue_tokens(
+                    str(body["user_id"]), str(body.get("token_kind", "portal")),
+                    body.get("revoke_old", True),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
             if path == "/api/admin/coverage" and method == "POST":
                 self.control._require_admin(self._bearer(environ))
                 body = self._read_json(environ)
@@ -1482,7 +1615,11 @@ def cli(argv: list[str] | None = None) -> int:
     cp = ControlPlane(args.db)
     cp.init_db()
     if args.command == "create-user":
-        print(json.dumps(cp.create_user(args.display_name, args.plan, args.user_id), ensure_ascii=False))
+        result = cp.create_user(args.display_name, args.plan, args.user_id)
+        # Never put either freshly issued plaintext token on CLI stdout. The
+        # Admin operator API is the supported protected delivery path.
+        print(json.dumps({"user_id": result["user_id"], "created": True,
+                          "delivery": "use the Admin token-issuance workflow"}, ensure_ascii=False))
     elif args.command == "create-cycle":
         print(cp.create_cycle(args.user_id, args.cycle_key, args.starts_at, args.ends_at))
     elif args.command == "add-credential":

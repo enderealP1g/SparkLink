@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.sparklink_control_plane import ControlPlane, PLAN_ORDER, POOL_NAMES, new_token, utc_now
+from src.sparklink_control_plane import ControlPlane, PLAN_ORDER, POOL_NAMES, utc_now
 
 
 class ReconciliationError(RuntimeError):
@@ -133,43 +133,28 @@ def main() -> int:
         validate_payload(payload)
         cp = ControlPlane(args.db)
         cp.init_db()
-        pending = read_existing_pending(args.token_bundle)
-        pending_users = pending.get("users", {}) if isinstance(pending, dict) else {}
-        if not isinstance(pending_users, dict):
-            raise ReconciliationError("pending_bundle_invalid")
         token_users: dict[str, dict] = {}
         user_ids = [user["user_id"] for user in payload["users"]]
         for user in payload["users"]:
             user_id = user["user_id"]
             with cp.connect() as db:
                 existing = db.execute(
-                    "SELECT subscription_token FROM users WHERE user_id=?", (user_id,)
+                    "SELECT user_id FROM users WHERE user_id=?", (user_id,)
                 ).fetchone()
-            previous = pending_users.get(user_id, {})
-            if not isinstance(previous, dict):
-                previous = {}
-            portal_token = previous.get("portal_token") if not existing else None
-            subscription_token = previous.get("subscription_token") if not existing else None
-            portal_token = portal_token or (new_token() if not existing else None)
-            subscription_token = subscription_token or (new_token() if not existing else None)
-            token_users[user_id] = {
-                "portal_token": portal_token or previous.get("portal_token"),
-                "subscription_token": subscription_token or previous.get("subscription_token"),
-            }
-            write_private_json(args.token_bundle.with_name(args.token_bundle.name + ".pending"), {
-                "generated_at": utc_now(), "users": token_users,
-            })
             result = cp.reconcile_user(
                 user_id, user["display_name"], user["plan"], user.get("role", "CUSTOMER"),
-                portal_token=portal_token, subscription_token=subscription_token,
             )
-            token_users[user_id] = {
-                "portal_token": result["portal_token"] or previous.get("portal_token"),
-                "subscription_token": result["subscription_token"],
-            }
-            write_private_json(args.token_bundle.with_name(args.token_bundle.name + ".pending"), {
-                "generated_at": utc_now(), "users": token_users,
-            })
+            # Existing users deliberately produce no plaintext token here. A
+            # lost token is never read back from the database; use the
+            # Admin-only issue/rotate workflow for a fresh delivery.
+            if not existing:
+                token_users[user_id] = {
+                    "portal_token": result["portal_token"],
+                    "subscription_token": result["subscription_token"],
+                }
+                write_private_json(args.token_bundle.with_name(args.token_bundle.name + ".pending"), {
+                    "generated_at": utc_now(), "users": token_users,
+                })
 
         for resource in payload.get("infrastructure_resources", []):
             cp.upsert_infrastructure_resource(resource)

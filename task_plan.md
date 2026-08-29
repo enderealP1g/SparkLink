@@ -62,3 +62,20 @@
 - Automatic collector 已切换为 PowerShell launcher + Python interval process；startup cleanup 只处理本 task 的 stale SSH forward，当前 task running。
 - 当前 coverage 为 `hypro02=ingested`、RackNerd/VMISS=`Unknown`（source reachable but no current per-user rows），不把 unknown 记为 zero。
 - AnyTLS 保持 `Deferred pending reliable metering`；Candidate Architecture 仍是 Proposal。
+
+## Production Operations Token Issuance & Delivery — 2026-08-29
+
+- [x] T0 — 暂停其它 Bug Hunt，确认当前 Control Plane/Portal、live DB schema、root identity 与受保护 Windows runtime 边界。
+- [x] T1 — 将 Portal/Subscription token storage 收敛为 hash-only，并实现 Admin-only issue/rotate/revoke workflow。
+- [x] T2 — 实现一次性 Windows protected delivery bundle 与显式 local-only clipboard helper；默认不向 stdout/chat 输出 plaintext。
+- [x] T3 — 补齐 old/wrong token rejection、cross-kind separation、DB no-plaintext、ACL/ignored-path regression checks。
+- [x] T4 — 备份并部署 Control Plane；只先 rotate root Portal token，生成 root bundle，独立验证新 token/旧 token和 public path。
+- [x] T5 — 使用新 token 完成 `spark.enrpiglink.top` owner acceptance；随后为六个 User 建立 delivery bundle 机制，不自动 rotate 其他现有 token。
+- [x] T6 — 记录脱敏运行证据，恢复原 Bug Hunt。
+
+### Token safety gates
+
+- Control Plane/SQLite 只保存 `portal_token_hash` 与 `subscription_token_hash`；legacy plaintext 列必须迁移并移除。
+- plaintext 只在 issue/rotate 响应到 operator process memory 与一次性 local delivery bundle 中存在；不进入 Git、日志、operations docs 或聊天。
+- 默认 rotate 立即使旧 token 失效；保留旧 token 只允许显式、受审计的选项。
+- Bundle 仅写入当前 Windows operator 可读的 ignored `runtime/delivery`；写入后验证 ignored、ACL、hash-only DB 和真实 wrong/old rejection。

@@ -45,3 +45,16 @@
 - Windows automatic collector 改由 `sparklink-collector-run.ps1` 负责 tunnel/process supervision，protected secret 由 Python 通过 `--secret-path` 解密，不通过 wrapper environment 传递；startup cleanup 仅匹配本 task 的固定 SSH forward。
 - 当前 live automatic interval 可重复得到 `1 ingested / 2 unknown / 0 failed`：`hypro02` 有 per-user counters，RackNerd/VMISS StatsService 可达但 identity migration 后没有当前 counter rows；Unknown 不表示 zero。task stop/start 已验证无残留 matching SSH tunnel 阻塞下一次启动。
 - `30 tests`、`compileall` 与 PowerShell parse checks 通过；Control Plane 入口也已拒绝 incomplete/fractional counter，避免缺失方向或截断值被补成可信 Usage。identity/cycle reconciliation 的 canonical ADR 与 operations record 已补齐。下一步为最终 secret scan、diff review、live service recheck 与本地 commit checkpoint。
+
+## 2026-08-29 — Production Operations Token Issuance & Delivery
+
+- Product Owner 确认当前第一个 blocker 是 Admin credential issuance/delivery；其它 Bug Hunt 暂停，先处理 Portal/Subscription token 的安全 issuance、rotation、delivery 与 rejection verification。
+- Read-only code audit 已确认 `users.subscription_token` 仍为 plaintext storage，当前没有 Admin issuance workflow；下一步先改本地 schema/API/Windows operator path，再做远端 backup/deploy。
+
+## 2026-08-29 — Production Operations Token Issuance & Delivery complete
+
+- 本地实现和完整测试通过：`38 tests`、`compileall`、`git diff --check`；覆盖 hash-only migration、旧/wrong/cross-kind rejection、Admin authorization、one-time protected bundle、ACL/ignored path 和 owner acceptance validator。
+- QQG Control Plane 已部署并重启迁移；live users schema 无 legacy plaintext 列，6/6 用户两类 hash 有效，foreign-key clean，service active，loopback health `ok`，现有业务计数保持不变。
+- root `usr_plus_manual_01` 新 Portal token 已写入 Windows ignored protected delivery bundle；bundle 未进入 Git，ACL 仅当前 operator。真实 Portal acceptance 通过：root / Plus / OWNER / `legacy-pre-baseline` / `Asia/Shanghai` / STANDARD + PREMIUM / `/api/me` self-scope。
+- live rejection verification 通过：本轮 superseded old Portal、wrong Portal、Portal-as-Subscription、wrong Subscription、Subscription-as-Portal 均 rejected；当前 root Subscription URL 未 rotate 且 accepted。
+- Admin list 已确认 6 个 User 可由同一 workflow 指定交付；没有自动 rotate 其它 User。迁移前 plaintext DB rollback copies 已删除，保留 post-migration hash-only snapshot；现在恢复原 Bug Hunt。
