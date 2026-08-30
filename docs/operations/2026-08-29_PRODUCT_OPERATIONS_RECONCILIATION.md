@@ -51,3 +51,11 @@ python deploy\issue_user_tokens.py copy --user Hegin --kind subscription
 本 checkpoint 的 local regression、schema migration 与 safe metadata API 是 management-plane evidence。DediRock live inspection 仍显示：服务可用，但当前没有可用于 SparkLink per-user attribution 的 Stats API/listener；为加入四名 Advanced User 需要 runtime identity/config mutation，且 systemd unit 没有可用的 no-interruption reload contract。该动作可能中断现有 data plane，因此保留为下一维护窗口的显式 gate。
 
 在 gate 解除前，DediRock 继续为 `reference-only/unqualified`，其 Usage 为 `Unknown`，不会进入 current Subscription。QQG/VMISS 的既有 Premium paths、legacy/shared access 与历史 Usage 不因本模型变更而撤销或重写。
+
+## 2026-08-30 admission addendum
+
+Product Owner subsequently authorized DediRock production admission. Read-only discovery found the four expected stable managed Reality identities already present, so the admission run did not rotate identities or restart DediRock. A protected root-only baseline was retained at `/var/backups/sparklink-identity-migration/admission-baseline-20260830T043755Z-dedirock/xray-config.json`.
+
+The live direct Reality/443 path passed 4/4 isolated Xray-client-to-public-request checks. DediRock is now `active/verified` in `ADVANCED`; Control Plane has four managed credential mappings and four current Advanced entries. Basic/Plus personal projections include DediRock while Free remains not configured: root/Hegin have 7 entries, abing 5, and dangbin 3. No AnyTLS was added and no legacy/shared access was revoked.
+
+Access and metering remain independent: DediRock is `access=allowed`, `subscription=allowed`, `metering=unknown`, `quota=unavailable`. The Windows collector now loads four Nodes and reports `attempted=4`, `ingested=3`, `unknown=1`, `failed=0`; DediRock User Usage remains `Unknown`, never zero-filled or inferred from host/provider/Nginx totals.

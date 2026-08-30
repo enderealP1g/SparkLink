@@ -1,8 +1,10 @@
 {
   "endpoint": "https://spark.enrpiglink.top",
   "nodes": [
-    {"node_id": "racknerd", "ssh_host": "racknerd-admin"},
-    {"node_id": "vmiss", "ssh_host": "la9929"},
-    {"node_id": "hypro02", "ssh_host": "sparklink-node-166"}
+    {"node_id": "racknerd", "ssh_host": "racknerd-admin", "metering_mode": "xray_stats"},
+    {"node_id": "vmiss", "ssh_host": "la9929", "metering_mode": "xray_stats"},
+    {"node_id": "hypro02", "ssh_host": "sparklink-node-166", "metering_mode": "xray_stats"},
+    {"node_id": "dedirock", "ssh_host": "dedirock-admin", "metering_mode": "unknown",
+     "metering_detail": "DediRock Xray per-user Stats source is unavailable; usage remains Unknown"}
   ]
 }

@@ -1,6 +1,6 @@
 # SparkLink Product / Operations Intent Reconciliation
 
-Status: in_progress (P0 complete; P1 management-plane slice complete; P1 runtime admission remains gated; P2-P5 and root Portal acceptance complete; P6 authoritative provider evidence pending)
+Status: in_progress (P0-P5 complete with DediRock Advanced admission; P6 provider evidence pending)
 
 ## Goal
 
@@ -23,7 +23,7 @@ Reconcile the current `main` repository and live SparkLink runtime against the P
 
 Checkpoint: the existing Windows task was started with the approved reversible action. A fresh interval completed with 3/3 Node ingest and 0 failed; latest live coverage timestamps advanced. No proxy data-plane configuration changed.
 
-### P1 — Restore Advanced as a truthful access/subscription vertical slice — management slice complete; runtime gate open
+### P1 — Restore Advanced as a truthful access/subscription vertical slice — complete
 
 - Add `ADVANCED` as a first-class Pool without introducing username-specific Plans.
 - Perform a separate DediRock admission check: Xray/VLESS service acceptance, per-user managed credential mapping, protocol and rollback evidence.
@@ -31,7 +31,9 @@ Checkpoint: the existing Windows task was started with the approved reversible a
 - Keep DediRock hard quota enforcement disabled until reliable per-user metering exists. Do not add AnyTLS to the projection.
 - Acceptance: Basic and Plus projections contain their intended Standard/Advanced/Premium surfaces; Free remains unchanged; no usage is fabricated.
 
-Implementation checkpoint: `ADVANCED` schema/pool, VLESS-only capability metadata, effective access, subscription filtering, and policy-only budget are implemented locally. DediRock live runtime has no per-user Stats API/listener; adding four managed identities requires a potentially disruptive Xray config mutation and is intentionally not applied in this checkpoint.
+Implementation checkpoint: `ADVANCED` schema/pool, VLESS-only capability metadata, effective access, subscription filtering, and policy-only budget are implemented. DediRock was admitted to the formal Advanced surface after read-only discovery, protected baseline backup, managed identity mapping, Xray config validation, and 4/4 isolated client acceptance. The existing stable managed identities were already present, so no DediRock runtime rotate/restart was needed in the admission run.
+
+Admission sequence completed: read-only discovery → protected rollback point → isolated per-user identity plan → config/persistent-row validation → service/client acceptance → Control Plane membership/projection → collector/coverage evidence. Runtime apply remains available for future missing identities with config SHA protection and automatic rollback.
 
 ### P2 — Represent effective access and operational allowances — implemented and live-verified
 
@@ -43,7 +45,7 @@ Implementation checkpoint: `ADVANCED` schema/pool, VLESS-only capability metadat
 ### P3 — Re-establish metering freshness and per-Node User Usage — implemented and live-verified
 
 - Extend the verified collector path and expose freshness/heartbeat so `Ready`/stopped is visible rather than silently treated as healthy.
-- Keep Xray Stats as the current authoritative customer observation surface. Resolve current RackNerd/VMISS per-user counter coverage through real controlled traffic or mark it `Unknown`; keep DediRock gap explicit.
+- Keep Xray Stats as the current authoritative customer observation surface. RackNerd/VMISS/QQG collection remains live; DediRock is explicitly configured as `Unknown` because no per-user Stats source is available.
 - Extend User/Admin views to show User × Node × Pool × Customer Cycle, with `0`, `Unknown`, and `stale` distinct.
 - Keep one Usage Ledger with Customer Cycle and Provider Resource Cycle as separate query windows.
 

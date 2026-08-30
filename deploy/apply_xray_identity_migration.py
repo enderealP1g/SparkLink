@@ -15,6 +15,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -135,6 +136,14 @@ def validate_entry(entry: dict) -> None:
         raise MigrationError("plan_uuid_not_rotated")
     if len(entry["new_email"]) > 128 or any(c.isspace() for c in entry["new_email"]):
         raise MigrationError("plan_email_invalid")
+    for key in ("source_tag",):
+        if key in entry and (
+            not isinstance(entry[key], str)
+            or not entry[key].strip()
+            or len(entry[key]) > 128
+            or any(c.isspace() for c in entry[key])
+        ):
+            raise MigrationError("plan_entry_invalid")
 
 
 def config_clients(config: dict):
@@ -270,6 +279,8 @@ def mutate_config(config: dict, entries: list[dict]) -> tuple[int, list[tuple[st
         new_uuid = entry["new_uuid"]
         new_email = entry["new_email"]
         sources = by_old.get(old_uuid, [])
+        if entry.get("source_tag"):
+            sources = [source for source in sources if source[0].get("tag") == entry["source_tag"]]
         existing_new = by_new.get(new_uuid)
         if existing_new is not None:
             if existing_new.get("email") != new_email:
@@ -324,6 +335,12 @@ def apply(plan: dict) -> dict:
     if not config_path.is_file() or not Path(binary).is_file():
         raise MigrationError("runtime_artifact_missing")
     config_stat = file_metadata(config_path)
+    expected_config_sha256 = plan.get("expected_config_sha256")
+    if expected_config_sha256 is not None:
+        if (not isinstance(expected_config_sha256, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_config_sha256)
+                or sha256_file(config_path).lower() != expected_config_sha256.lower()):
+            raise MigrationError("config_changed_since_discovery")
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

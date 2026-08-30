@@ -696,6 +696,89 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaises(ServiceUnavailable):
             self.cp.subscription(self.user["subscription_token"])
 
+    def test_managed_runtime_admission_is_atomic_idempotent_and_metering_independent(self):
+        entries = [{
+            "user_id": "usr_test",
+            "runtime_ref_hash": "8" * 64,
+            "runtime_family": "xray",
+            "protocol": "vless",
+            "credential_kind": "managed",
+            "uri": "vless://11111111-1111-4111-8111-111111111111@dedirock.example:443",
+            "minimum_plan": "Basic",
+        }]
+        first = self.cp.admit_runtime_entries(
+            "dedirock", "ADVANCED", entries, qualification="verified",
+            display_name="DediRock Advanced serving Node",
+            source="test-runtime-admission", metering_status="unknown",
+            detail="access accepted; per-user metering unavailable",
+        )
+        self.assertEqual(first["credentials_created"], 1)
+        self.assertEqual(first["subscriptions_created"], 1)
+        self.assertEqual(first["credentials_reused"], 0)
+        self.assertEqual(first["subscriptions_reused"], 0)
+        second = self.cp.admit_runtime_entries(
+            "dedirock", "ADVANCED", entries, qualification="verified",
+            source="test-runtime-admission", metering_status="unknown",
+        )
+        self.assertEqual(second["credentials_created"], 0)
+        self.assertEqual(second["subscriptions_created"], 0)
+        self.assertEqual(second["credentials_reused"], 1)
+        self.assertEqual(second["subscriptions_reused"], 1)
+        with self.cp.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM credentials WHERE node_id='dedirock'"
+            ).fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM subscription_entries WHERE node_id='dedirock'"
+            ).fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM node_pool_memberships WHERE node_id='dedirock' AND status='active'"
+            ).fetchone()[0], 1)
+        detail = self.cp.admin_user_detail("usr_test")
+        self.assertEqual(detail["subscription_pool_ids"], ["ADVANCED"])
+        advanced = next(item for item in detail["usage_by_node"] if item["node_id"] == "dedirock")
+        self.assertEqual(advanced["coverage_status"], "unknown")
+        self.assertIsNone(advanced["used_bytes"])
+        capability = next(item for item in self.cp.effective_access("usr_test")
+                          if item["node_id"] == "dedirock")["capability"]
+        self.assertEqual(capability["metering_status"], "unknown")
+        self.assertEqual(capability["quota_status"], "unavailable")
+        self.assertEqual(
+            next(item for item in self.cp.admin_overview()["nodes"] if item["node_id"] == "dedirock")["display_name"],
+            "DediRock Advanced serving Node",
+        )
+
+    def test_managed_runtime_admission_rolls_back_on_duplicate_user(self):
+        entries = [{
+            "user_id": "usr_test",
+            "runtime_ref_hash": "9" * 64,
+            "runtime_family": "xray",
+            "protocol": "vless",
+            "credential_kind": "managed",
+            "uri": "vless://22222222-2222-4222-8222-222222222222@dedirock.example:443",
+            "minimum_plan": "Basic",
+        }, {
+            "user_id": "usr_test",
+            "runtime_ref_hash": "a" * 64,
+            "runtime_family": "xray",
+            "protocol": "vless",
+            "credential_kind": "managed",
+            "uri": "vless://33333333-3333-4333-8333-333333333333@dedirock.example:443",
+            "minimum_plan": "Basic",
+        }]
+        with self.assertRaises(Conflict):
+            self.cp.admit_runtime_entries("dedirock", "ADVANCED", entries)
+        with self.cp.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT status FROM nodes WHERE node_id='dedirock'"
+            ).fetchone()[0], "reference-only")
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM credentials WHERE node_id='dedirock'"
+            ).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM subscription_entries WHERE node_id='dedirock'"
+            ).fetchone()[0], 0)
+
     def test_policy_budget_cannot_become_hard_enforcement_and_migration_is_append_only(self):
         budget = self.cp.set_operational_budget(
             "usr_test", 200 * 1024 ** 3, node_id="hypro02", pool_id="PREMIUM",

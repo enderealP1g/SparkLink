@@ -70,4 +70,12 @@ Admin API 还提供 effective access、policy-only budget、collector heartbeat�
 
 P0 collector freshness 已通过可回滚的 Task Scheduler restart、3/3 one-shot smoke run、正式任务恢复以及新 heartbeat 证实；P2/P3 的 effective access、per-Node Usage、Customer Cycle 与 heartbeat 模型已写入 live Control Plane management plane，P4/P5 的 OWNER Console、六用户 delivery bundles 与 append-only migration state 位于本地 operator path。P6 的 provider snapshot importer 只接受 source-labelled authoritative input；缺少 provider API/dashboard evidence 时必须记录 `unknown`，不得从 financial due date 推断 traffic reset，也不得把 provider total 当作 Customer Usage。
 
-DediRock 当前 live Xray 配置没有可用的 per-user Stats listener/API，且运行时身份增量需要重启 Xray。因该动作可能短暂中断现有 data plane，本 checkpoint 不执行 runtime mutation、不撤销 legacy/shared access、不把 DediRock 标为 current Advanced projection；后续须在明确 maintenance window 内完成 staged config、`xray run -test`、受保护 backup/rollback、restart 后 service/listener/client acceptance，再写入 Control Plane admission。
+DediRock 当前 live Xray 配置没有可用的 per-user Stats listener/API；它现在以 access/subscription allowed、metering unknown、quota unavailable 的正式 Advanced Node 进入 personal projection。其 direct Reality/443 path 已通过 4/4 isolated client acceptance；没有 AnyTLS entry，且没有撤销 legacy/shared access。
+
+## 2026-08-30 DediRock admission addendum
+
+`python deploy\admit_dedirock.py` 是本地 OWNER/operator admission workflow。它通过现有 protected Admin secret 和 SSH operator aliases 完成 read-only discovery、stable managed identity reconciliation、Xray acceptance、原子 Control Plane registration、六用户 delivery refresh 与公网 projection verification。runtime identity 已存在时不 rotate；缺失 identity 时才生成 transient UUID 并使用 config SHA gate、root-only backup、config validation 和自动 rollback。
+
+本次 live result：DediRock 4/4 managed identities reused；4/4 isolated client tests passed；Control Plane credentials/subscription entries first-run created 4/4，idempotent rerun reused 4/4；root/Hegin/abing/dangbin 的个人公网 projection 分别为 7/7/5/3 条 VLESS，Free 保持 `not_configured`。六个本地 protected bundles 均 refreshed without token rotation，OWNER index 仍不含 plaintext。
+
+Collector 配置把 DediRock 标为 `metering_mode=unknown`，所以正式 heartbeat truthful 地报告 `attempted=4, ingested=3, unknown=1, failed=0`（status `degraded`）。DediRock Usage 在 Portal/Admin 中为 `Unknown`，不会使用 host/provider/Nginx aggregate 伪造 User Usage，也不会启用 700GB hard quota。

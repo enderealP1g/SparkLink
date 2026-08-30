@@ -263,10 +263,11 @@ def post_json(endpoint: str, admin_token: str, body: dict) -> dict:
     return _request_json(endpoint, admin_token, "/api/admin/ingest/observations", body)
 
 
-def post_coverage(endpoint: str, admin_token: str, node_id: str, status: str, detail: str) -> dict:
+def post_coverage(endpoint: str, admin_token: str, node_id: str, status: str,
+                  detail: str, source: str = "xray-stats-api") -> dict:
     return _request_json(
         endpoint, admin_token, "/api/admin/coverage",
-        {"node_id": node_id, "source": "xray-stats-api", "status": status,
+        {"node_id": node_id, "source": source, "status": status,
          "detail": detail[:500], "observed_at": utc_now()},
     )
 
@@ -335,6 +336,24 @@ def validate_remote_observations(observations: object) -> list[dict]:
 def collect_node(endpoint: str, admin_token: str, node: dict) -> dict:
     node_id = str(node["node_id"])
     try:
+        metering_mode = str(node.get("metering_mode", "xray_stats")).strip().lower()
+        if metering_mode not in {"xray_stats", "unknown"}:
+            raise CollectorError("invalid_metering_mode")
+        if metering_mode == "unknown":
+            reason = str(node.get(
+                "metering_detail",
+                "per-user metering source is unavailable; usage remains Unknown",
+            ))[:120]
+            try:
+                post_coverage(
+                    endpoint, admin_token, node_id, "unknown", reason,
+                    source="node-capability",
+                )
+            except Exception:
+                return {"node_id": node_id, "status": "unknown", "reason": reason,
+                        "coverage_recorded": False}
+            return {"node_id": node_id, "status": "unknown", "reason": reason,
+                    "coverage_recorded": True}
         result = remote_stats(str(node["ssh_host"]))
         if not result.get("ok"):
             reason = str(result.get("error") or "remote_stats_gap")[:120]
@@ -388,6 +407,8 @@ def load_config(path: Path) -> dict:
     for node in config["nodes"]:
         if not isinstance(node, dict) or not node.get("node_id") or not node.get("ssh_host"):
             raise SystemExit("collector config contains an invalid node")
+        if str(node.get("metering_mode", "xray_stats")).strip().lower() not in {"xray_stats", "unknown"}:
+            raise SystemExit("collector config contains an invalid metering mode")
     if not config.get("endpoint"):
         raise SystemExit("collector config must contain endpoint")
     return config

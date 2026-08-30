@@ -134,6 +134,25 @@ class CollectorTests(unittest.TestCase):
         post.assert_not_called()
         coverage.assert_called_once()
 
+    def test_configured_metering_gap_is_unknown_without_remote_query(self):
+        node = {
+            "node_id": "dedirock",
+            "ssh_host": "dedirock-admin",
+            "metering_mode": "unknown",
+            "metering_detail": "DediRock Stats unavailable",
+        }
+        with patch.object(collector, "remote_stats") as remote, \
+                patch.object(collector, "post_coverage", return_value={}) as coverage:
+            value = collector.collect_node("https://control.example.test", "admin", node)
+
+        self.assertEqual(value["status"], "unknown")
+        self.assertEqual(value["reason"], "DediRock Stats unavailable")
+        remote.assert_not_called()
+        coverage.assert_called_once_with(
+            "https://control.example.test", "admin", "dedirock", "unknown",
+            "DediRock Stats unavailable", source="node-capability",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

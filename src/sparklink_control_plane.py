@@ -18,7 +18,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from wsgiref.simple_server import WSGIRequestHandler, make_server
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -813,6 +813,244 @@ class ControlPlane:
             "subscription_status": "allowed", "metering_status": metering_status,
             "quota_status": "unavailable", "supported_protocols": protocols,
             "effective_from": when, "source": str(source).strip(),
+        }
+
+    def admit_runtime_entries(self, node_id: str, pool_id: str, entries: list[dict],
+                              qualification: str = "verified",
+                              display_name: str | None = None,
+                              source: str = "runtime-admission",
+                              effective_from: str | None = None,
+                              metering_status: str = "unknown",
+                              supported_protocols: object = ("vless",),
+                              detail: str = "") -> dict:
+        """Atomically admit managed runtime identities and current projections.
+
+        Runtime mutation is deliberately performed by a separate, root-only
+        Node operator.  This method records only the already-verified,
+        non-secret mapping after runtime acceptance.  It is idempotent for the
+        same node/runtime reference hash and subscription entry.
+        """
+        if pool_id not in POOL_NAMES:
+            raise ControlPlaneError("invalid pool")
+        if not isinstance(entries, list) or not entries:
+            raise ControlPlaneError("runtime admission entries are empty")
+        when = normalize_time(effective_from) if effective_from else utc_now()
+        if when is None:
+            raise ControlPlaneError("effective_from must be ISO-8601")
+        protocols = self._validate_capability_values(
+            "allowed", "allowed", metering_status, "unavailable", supported_protocols
+        )
+        if not str(source).strip():
+            raise ControlPlaneError("runtime admission source must not be empty")
+        if display_name is not None and (
+            not isinstance(display_name, str) or not display_name.strip() or len(display_name) > 120
+        ):
+            raise ControlPlaneError("runtime admission display name is invalid")
+
+        normalized: list[dict] = []
+        seen_users: set[str] = set()
+        seen_hashes: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ControlPlaneError("runtime admission entry is invalid")
+            user_id = str(entry.get("user_id") or "").strip()
+            runtime_ref_hash = str(entry.get("runtime_ref_hash") or "").strip().lower()
+            runtime_family = str(entry.get("runtime_family") or "").strip().lower()
+            protocol = str(entry.get("protocol") or "").strip().lower()
+            credential_kind = str(entry.get("credential_kind", "managed")).strip().lower()
+            uri = str(entry.get("uri") or "").strip()
+            minimum_plan = str(entry.get("minimum_plan") or "").strip()
+            if not user_id or user_id in seen_users:
+                raise Conflict("runtime admission user mapping is duplicate or empty")
+            if (len(runtime_ref_hash) != 64
+                    or any(c not in "0123456789abcdef" for c in runtime_ref_hash)
+                    or runtime_ref_hash in seen_hashes):
+                raise Conflict("runtime admission reference hash is duplicate or invalid")
+            if not runtime_family or len(runtime_family) > 80:
+                raise ControlPlaneError("runtime family is invalid")
+            if protocol != "vless" or protocol not in protocols:
+                raise Conflict("runtime admission supports only VLESS")
+            if credential_kind != "managed":
+                raise Conflict("runtime admission requires managed credentials")
+            parsed = urlsplit(uri)
+            if (parsed.scheme.lower() != "vless" or not parsed.netloc
+                    or any(char.isspace() for char in uri) or len(uri) > 4096):
+                raise ControlPlaneError("runtime admission URI is invalid")
+            if minimum_plan not in PLAN_ORDER or pool_id not in PLAN_POOL_ENTITLEMENTS[minimum_plan]:
+                raise ControlPlaneError("runtime admission minimum plan is invalid")
+            seen_users.add(user_id)
+            seen_hashes.add(runtime_ref_hash)
+            normalized.append({
+                "user_id": user_id,
+                "runtime_ref_hash": runtime_ref_hash,
+                "runtime_family": runtime_family,
+                "protocol": protocol,
+                "credential_kind": credential_kind,
+                "uri": uri,
+                "minimum_plan": minimum_plan,
+            })
+
+        credential_created = 0
+        credential_reused = 0
+        subscription_created = 0
+        subscription_reused = 0
+        migration_events = 0
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
+                raise NotFound("node not found")
+
+            # Keep the same effective membership/capability semantics as the
+            # ordinary admission endpoint, but in this transaction so a
+            # projection can never be committed without its Node admission.
+            db.execute(
+                """UPDATE nodes SET status='active',qualification=?,
+                          display_name=COALESCE(?,display_name) WHERE node_id=?""",
+                (qualification, display_name.strip() if display_name is not None else None, node_id),
+            )
+            same_membership = db.execute(
+                """SELECT 1 FROM node_pool_memberships
+                   WHERE node_id=? AND pool_id=? AND status='active' AND effective_to IS NULL
+                   ORDER BY effective_from DESC LIMIT 1""",
+                (node_id, pool_id),
+            ).fetchone()
+            if same_membership is None:
+                db.execute(
+                    """UPDATE node_pool_memberships
+                       SET effective_to=?,status='superseded'
+                       WHERE node_id=? AND status='active' AND effective_to IS NULL AND pool_id<>?""",
+                    (when, node_id, pool_id),
+                )
+                db.execute(
+                    """INSERT INTO node_pool_memberships(node_id,pool_id,effective_from,effective_to,status)
+                       VALUES (?,?,?,NULL,'active')
+                       ON CONFLICT(node_id,pool_id,effective_from) DO UPDATE SET
+                           effective_to=NULL,status='active'""",
+                    (node_id, pool_id, when),
+                )
+            db.execute(
+                """INSERT INTO node_capabilities(
+                       node_id,access_status,subscription_status,metering_status,quota_status,
+                       supported_protocols,source,observed_at,detail
+                   ) VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(node_id) DO UPDATE SET
+                       access_status='allowed',subscription_status='allowed',
+                       metering_status=excluded.metering_status,quota_status='unavailable',
+                       supported_protocols=excluded.supported_protocols,source=excluded.source,
+                       observed_at=excluded.observed_at,detail=excluded.detail""",
+                (node_id, "allowed", "allowed", metering_status, "unavailable",
+                 json.dumps(protocols, separators=(",", ":")), str(source).strip(), when,
+                 str(detail)[:500]),
+            )
+
+            for item in normalized:
+                user = db.execute(
+                    "SELECT user_id,plan FROM users WHERE user_id=?", (item["user_id"],)
+                ).fetchone()
+                if user is None:
+                    raise NotFound("user not found")
+                if pool_id not in PLAN_POOL_ENTITLEMENTS.get(user["plan"], frozenset()):
+                    raise Conflict("runtime admission user is not entitled to pool")
+                if PLAN_ORDER[user["plan"]] < PLAN_ORDER[item["minimum_plan"]]:
+                    raise Conflict("runtime admission minimum plan exceeds user plan")
+                access = self._access_at(db, user, node_id, when)
+                if access["decision"] != "allow":
+                    raise Conflict("runtime admission user access is denied")
+
+                credential = db.execute(
+                    """SELECT credential_id,user_id,runtime_family,protocol,credential_kind,status
+                       FROM credentials WHERE node_id=? AND runtime_ref_hash=?""",
+                    (node_id, item["runtime_ref_hash"]),
+                ).fetchone()
+                if credential is None:
+                    credential_id = f"cred_{uuid.uuid4().hex}"
+                    db.execute(
+                        """INSERT INTO credentials
+                           (credential_id,node_id,user_id,runtime_ref_hash,runtime_family,protocol,
+                            credential_kind,status,created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (credential_id, node_id, item["user_id"], item["runtime_ref_hash"],
+                         item["runtime_family"], item["protocol"], item["credential_kind"],
+                         "active", utc_now()),
+                    )
+                    db.execute(
+                        """INSERT INTO credential_migration_events(
+                               event_id,user_id,subject_kind,subject_ref,state,observed_at,source,detail,created_at
+                           ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (f"mig_{uuid.uuid4().hex}", item["user_id"], "runtime_credential", credential_id,
+                         "issued", when, str(source)[:200],
+                         "managed runtime identity admitted after isolated acceptance", utc_now()),
+                    )
+                    credential_created += 1
+                    migration_events += 1
+                else:
+                    if (credential["user_id"] != item["user_id"]
+                            or credential["runtime_family"] != item["runtime_family"]
+                            or credential["protocol"] != item["protocol"]
+                            or credential["credential_kind"] != item["credential_kind"]
+                            or credential["status"] != "active"):
+                        raise Conflict("runtime admission credential mapping conflicts")
+                    credential_id = credential["credential_id"]
+                    credential_reused += 1
+
+                existing = db.execute(
+                    """SELECT entry_id,uri,minimum_plan,projection_status,enabled
+                       FROM subscription_entries
+                       WHERE user_id=? AND node_id=? AND pool_id=? AND credential_id=? AND protocol=?
+                       ORDER BY created_at DESC,entry_id DESC LIMIT 1""",
+                    (item["user_id"], node_id, pool_id, credential_id, item["protocol"]),
+                ).fetchone()
+                if existing is not None:
+                    if (existing["uri"] != item["uri"]
+                            or existing["minimum_plan"] != item["minimum_plan"]):
+                        db.execute(
+                            "UPDATE subscription_entries SET projection_status='retired',enabled=0 WHERE entry_id=?",
+                            (existing["entry_id"],),
+                        )
+                        existing = None
+                    elif existing["projection_status"] != "current" or not existing["enabled"]:
+                        db.execute(
+                            "UPDATE subscription_entries SET projection_status='current',enabled=1 WHERE entry_id=?",
+                            (existing["entry_id"],),
+                        )
+                    if existing is not None:
+                        subscription_reused += 1
+                        continue
+
+                conflict = db.execute(
+                    """SELECT entry_id FROM subscription_entries
+                       WHERE user_id=? AND node_id=? AND pool_id=? AND protocol=?
+                         AND projection_status='current' AND enabled=1
+                         AND (credential_id IS NULL OR credential_id<>?)""",
+                    (item["user_id"], node_id, pool_id, item["protocol"], credential_id),
+                ).fetchone()
+                if conflict is not None:
+                    raise Conflict("runtime admission has a conflicting current projection")
+                db.execute(
+                    """INSERT INTO subscription_entries
+                       (entry_id,user_id,node_id,pool_id,credential_id,protocol,uri,minimum_plan,
+                        projection_status,enabled,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
+                    (f"sub_{uuid.uuid4().hex}", item["user_id"], node_id, pool_id, credential_id,
+                     item["protocol"], item["uri"], item["minimum_plan"], "current", utc_now()),
+                )
+                subscription_created += 1
+
+        return {
+            "ok": True,
+            "node_id": node_id,
+            "pool_id": pool_id,
+            "display_name": display_name.strip() if display_name is not None else None,
+            "qualification": qualification,
+            "metering_status": metering_status,
+            "quota_status": "unavailable",
+            "managed_users": len(normalized),
+            "credentials_created": credential_created,
+            "credentials_reused": credential_reused,
+            "subscriptions_created": subscription_created,
+            "subscriptions_reused": subscription_reused,
+            "migration_events": migration_events,
+            "effective_from": when,
+            "source": str(source).strip(),
         }
 
     def set_access_override(self, user_id: str, node_id: str, decision: str,
@@ -2526,6 +2764,18 @@ class App:
                     str(body.get("source", "operator")), body.get("effective_from"),
                     str(body.get("metering_status", "unknown")), body.get("supported_protocols", ["vless"]),
                     str(body.get("detail", "")),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
+            if path == "/api/admin/runtime-admission" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.admit_runtime_entries(
+                    str(body["node_id"]), str(body["pool_id"]), list(body["entries"]),
+                    str(body.get("qualification", "verified")),
+                    body.get("display_name"),
+                    str(body.get("source", "runtime-admission")), body.get("effective_from"),
+                    str(body.get("metering_status", "unknown")),
+                    body.get("supported_protocols", ["vless"]), str(body.get("detail", "")),
                 )
                 return self._reply(start_response, 201, json_bytes(value))
             if path == "/api/admin/access-override" and method == "POST":

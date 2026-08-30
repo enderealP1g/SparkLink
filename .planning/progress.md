@@ -51,3 +51,16 @@ Product Owner approved autonomous construction of P0-P6 on 2026-08-29. P0 is com
 - Collector recovery required replacing a stale task run after its outer SSH tunnel exited. A foreground smoke cycle then completed 3/3; the formal Scheduled Task was restarted and verified `Running` with local tunnel listening, 3/3 safe collector cycle, and live `completed` heartbeat.
 - OWNER Console smoke passed on a separate local forward: loopback page and authenticated metadata state both returned 200 for all six Users; the response contains no exact secret-bearing fields. No rotate or clipboard operation was invoked.
 - Portal landing page acceptance is complete through the real public browser: the page rendered root self data as OWNER/Plus with the expected Customer Cycle and independent Standard/Advanced/Premium rows; no token was entered into chat or emitted in output.
+
+## 2026-08-30 — DediRock / Advanced admission authorized
+
+- Product Owner explicitly authorized DediRock production admission, including a reversible runtime reload/restart, while retaining the independent Access / Metering / Quota boundaries. P7 hard quota and automatic blocking remain unauthorized.
+- Current phase is read-only DediRock discovery and admission design. Do not write DediRock config, x-ui rows, or Control Plane membership until the protected rollback point and exact managed identity mapping are verified.
+
+## 2026-08-30 — DediRock / Advanced admission completed
+
+- Deployed the atomic runtime-admission endpoint to QQG with a protected code backup at `/var/backups/sparklink-control-plane/runtime-admission-20260830T044354Z/sparklink_control_plane.py`; the live source SHA matched the tested candidate and remained `sparklink:sparklink 0640` with service/health active.
+- DediRock discovery found all four expected stable managed Reality identities already present. A protected DediRock baseline config backup was retained at `/var/backups/sparklink-identity-migration/admission-baseline-20260830T043755Z-dedirock/xray-config.json`; no runtime mutation, token rotation, or Xray restart was needed for admission.
+- Isolated client acceptance passed 4/4 through temporary Xray clients and real public HTTPS requests. Control Plane admission is idempotent: four managed credentials and four Advanced projections were registered, then the rerun reused all eight records and corrected the node display name to `DediRock Advanced serving Node` without creating duplicate membership.
+- Refreshed all six protected delivery bundles without rotating any User token. Public projection checks passed for the four eligible Users (7/7/5/3 entries as applicable), root OWNER self-scope passed, and Free Users remained not configured. Legacy/shared access was unchanged.
+- Restarted the Windows collector task so it loaded the four-node config. Formal collector evidence is `attempted=4`, `ingested=3`, `unknown=1`, `failed=0`; DediRock coverage and Advanced Usage remain `Unknown`, with no synthetic zero or aggregate attribution.

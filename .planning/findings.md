@@ -79,3 +79,18 @@ Evidence date: 2026-08-29. Evidence sources were re-read from the checked-out `m
 
 - No Node configuration, DNS, Cloudflare route, Task Scheduler registration, Control Plane database, token, subscription, or credential was changed during this reconciliation.
 - The only local additions from this review are the `.planning/` review artifacts.
+
+## 2026-08-30 — DediRock admission discovery
+
+- Read-only discovery through the existing `dedirock-admin` operator path confirmed `xray`, `nginx`, and `sing-box` are active. The Xray unit uses `/etc/xray/config.json` with the installed Xray binary and `run -test -config` validation shape; the config is root-owned with mode `0640`.
+- The DediRock config contains a public `vless` `reality` inbound on TCP/443 with three existing clients and a loopback `vless` XHTTP bridge on TCP/10080 with three clients. Existing client identity values and Reality key material were not recorded in the findings.
+- DediRock has no `/etc/x-ui/x-ui.db`. The Xray Stats query against `127.0.0.1:62789` returned non-zero, so admission can prove access but must record metering as `unknown`; no host, Nginx, or provider aggregate may be attributed to a User.
+- Active listeners include 443, 10080, 2053, 8443, 9443, and 40000. The intended admission path is the direct `dedirock.enrpiglink.top:443` Reality endpoint; the existing XHTTP/ShadowTLS/AnyTLS paths remain outside the Advanced VLESS projection.
+- The admission runner must use a stable managed email per SparkLink User, clone only a non-managed Reality client template, preserve all old clients, generate fresh UUIDs only for missing managed identities, validate before restart, retain a root-only remote backup, and return only counts/hashes/status metadata.
+
+## 2026-08-30 — DediRock Advanced admission checkpoint
+
+- DediRock formal admission passed for `root`, `Hegin`, `abing`, and `dangbin`: the live Reality/443 path had all four expected stable managed identities already present, so no runtime credential rotation or Xray restart was necessary. A root-only baseline config backup was nevertheless retained at `/var/backups/sparklink-identity-migration/admission-baseline-20260830T043755Z-dedirock/xray-config.json` with SHA-256 `25343c73ed4796c91229ff4a34554fd9f23cd7d8215ac3d1d991ef86218d8cc0`.
+- Four isolated transient Xray client configurations completed real SOCKS-to-public-request acceptance. DediRock is now `active/verified`, an `ADVANCED` member, and advertises only VLESS access/subscription; XHTTP, ShadowTLS, and AnyTLS remain outside the projection.
+- Control Plane now has four managed DediRock credentials and four current Advanced subscription entries. Public personal projections are root/Hegin 7 entries, abing 5 entries, dangbin 3 entries; Free Users remain not configured. No legacy/shared access was revoked.
+- DediRock capability is `access=allowed`, `subscription=allowed`, `metering=unknown`, `quota=unavailable`. Collector coverage is intentionally `unknown`, and the formal Windows heartbeat is `degraded` with `attempted=4`, `ingested=3`, `failed=0`, `unknown=1`; no provider/host/Nginx aggregate is used as User Usage.
