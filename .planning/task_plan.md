@@ -1,6 +1,6 @@
 # SparkLink Product / Operations Intent Reconciliation
 
-Status: in_progress (P0 complete; P1 management-plane slice complete; P1 runtime admission remains gated; P2-P6 live checkpoint pending)
+Status: in_progress (P0 complete; P1 management-plane slice complete; P1 runtime admission remains gated; P2-P5 live checkpoint complete; P6 authoritative provider evidence pending)
 
 ## Goal
 
@@ -33,28 +33,28 @@ Checkpoint: the existing Windows task was started with the approved reversible a
 
 Implementation checkpoint: `ADVANCED` schema/pool, VLESS-only capability metadata, effective access, subscription filtering, and policy-only budget are implemented locally. DediRock live runtime has no per-user Stats API/listener; adding four managed identities requires a potentially disruptive Xray config mutation and is intentionally not applied in this checkpoint.
 
-### P2 — Represent effective access and operational allowances — implemented locally; live apply pending
+### P2 — Represent effective access and operational allowances — implemented and live-verified
 
 - Add generic, time-effective User-specific access decisions/allocations layered after Plan defaults: allow/deny plus Primary/Backup/Available/Reserved semantics where applicable.
 - Add a separate operational-budget record keyed to User/Node/Provider Resource Cycle, with explicit `policy_only` versus enforceable state.
 - Seed the Product Owner's current intended Premium allocation only after review: Hegin VMISS primary / QQG available; root VMISS reserved / QQG primary; abing VMISS deny / QQG primary with a 200 GB policy budget.
 - Keep historical Usage append-preserving and never hardcode a username-specific Plan.
 
-### P3 — Re-establish metering freshness and per-Node User Usage — implemented locally; live apply pending
+### P3 — Re-establish metering freshness and per-Node User Usage — implemented and live-verified
 
 - Extend the verified collector path and expose freshness/heartbeat so `Ready`/stopped is visible rather than silently treated as healthy.
 - Keep Xray Stats as the current authoritative customer observation surface. Resolve current RackNerd/VMISS per-user counter coverage through real controlled traffic or mark it `Unknown`; keep DediRock gap explicit.
 - Extend User/Admin views to show User × Node × Pool × Customer Cycle, with `0`, `Unknown`, and `stale` distinct.
 - Keep one Usage Ledger with Customer Cycle and Provider Resource Cycle as separate query windows.
 
-### P4 — Build the smallest OWNER read-oriented Admin Console — implemented locally; live deploy pending
+### P4 — Build the smallest OWNER read-oriented Admin Console — implemented; live management path verified
 
 - Add an OWNER-only read surface for health, attention items, Users, Plan/Role, default and effective entitlements, per-Node/per-Pool Usage, coverage freshness, subscription state, credential/migration state, and infrastructure context.
 - Make the homepage answer service health, Premium capacity pressure, and items requiring OWNER attention.
 - Do not iframe vendor dashboards; read normalized local snapshots and show source/observed_at/freshness.
 - Keep high-risk operations behind explicit confirmation; keep dangerous schema/runtime/provider changes outside normal Admin UX.
 
-### P5 — Make credential and legacy migration state durable and operator-friendly — implemented locally; live deploy pending
+### P5 — Make credential and legacy migration state durable and operator-friendly — implemented and six-user delivery reconciled
 
 - Preserve the current hash-only Control Plane boundary. If direct reveal/copy is needed, use an explicit Windows DPAPI-protected operator vault/bundle with plaintext only in memory during copy/reveal; never move plaintext into SQLite, Git, logs, or chat.
 - Add append-only migration events/state: issued, delivered, fetched, managed traffic observed, confirmed, legacy retirement ready, retired. Keep legacy Subscription retirement distinct from runtime Credential retirement.

@@ -540,7 +540,10 @@ def verify_public_subscription_projection(
         raise OperatorError("subscription_url_not_public_endpoint")
     subscription_token_from_url(subscription_url_value)
     expected_pools = PLAN_POOL_IDS.get(plan)
-    if expected_pools is None or set(expected_pool_ids) != expected_pools:
+    configured_pools = set(expected_pool_ids)
+    if (expected_pools is None or not configured_pools.issubset(expected_pools)
+            or (plan == "Free" and configured_pools)
+            or len(configured_pools) != len(expected_pool_ids)):
         raise OperatorError("subscription_entitlement_mismatch")
     status, raw = _request_url(
         subscription_url_value,
@@ -781,7 +784,10 @@ def validate_reconciliation_scope(users: list[dict]) -> None:
     for user in users:
         expected_pools = PLAN_POOL_IDS[user["plan"]]
         actual_pools = user["subscription_pool_ids"]
-        if set(actual_pools) != expected_pools or len(actual_pools) != len(set(actual_pools)):
+        configured_pools = set(actual_pools)
+        if (not configured_pools.issubset(expected_pools)
+                or (user["plan"] == "Free" and configured_pools)
+                or len(actual_pools) != len(configured_pools)):
             raise OperatorError("subscription_entitlement_mismatch")
         if any(protocol.lower() == "anytls" for protocol in user["subscription_protocols"]):
             raise OperatorError("subscription_anytls_configured")

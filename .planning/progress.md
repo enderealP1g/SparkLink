@@ -41,3 +41,13 @@ Product Owner approved autonomous construction of P0-P6 on 2026-08-29. P0 is com
 - Added CLI exact confirmation for legacy revoke; revoke now requires latest current subscription migration event to be `confirmed`, so a later issuance invalidates an older confirmation.
 - Local checkpoint verification: 53 unittest cases passed; all touched Python files compile; `git diff --check` passed.
 - Live DediRock remains a gate: current config has no per-user Xray Stats surface and Xray identity changes may require restart. No DediRock runtime mutation, legacy revoke, or user data-plane interruption was performed.
+
+## 2026-08-30 — live P2-P6 management checkpoint
+
+- Deployed the approved management-plane slice to QQG with a protected backup and rollback path; Control Plane health is `ok`, six new management tables are present, hash-only user credentials and pre/post migration counts are clean, and proxy service states are unchanged.
+- Applied the approved effective access and policy-only budget metadata: Hegin VMISS primary/QQG available; root QQG primary/VMISS reserved; abing VMISS deny/QQG primary with 200 GB policy; root/Hegin/abing/dangbin DediRock Advanced allowances are 700 GB policy-only. No hard quota, runtime DediRock admission, or legacy revoke was performed.
+- Reconciled all six protected delivery bundles using trusted-bundle reuse where available and issue-only where plaintext was unavailable. Public subscription checks, wrong/cross-kind rejection checks, and per-user `/api/me` self-scope checks passed without printing secrets. OWNER index contains metadata only.
+- Live projection is truthful for the currently admitted runtime: root/Hegin 6 VLESS entries across Standard+Premium, abing 4 across Standard+Premium with VMISS denied, dangbin 2 Standard, and Free not configured. Advanced remains an entitled but unadmitted runtime surface; AnyTLS is absent.
+- Collector recovery required replacing a stale task run after its outer SSH tunnel exited. A foreground smoke cycle then completed 3/3; the formal Scheduled Task was restarted and verified `Running` with local tunnel listening, 3/3 safe collector cycle, and live `completed` heartbeat.
+- OWNER Console smoke passed on a separate local forward: loopback page and authenticated metadata state both returned 200 for all six Users; the response contains no exact secret-bearing fields. No rotate or clipboard operation was invoked.
+- Portal landing page is verified through the real public browser and root API acceptance is complete. Page-level entry of the local protected root Portal token is intentionally still pending action-time browser confirmation; no token was entered or emitted in this turn.

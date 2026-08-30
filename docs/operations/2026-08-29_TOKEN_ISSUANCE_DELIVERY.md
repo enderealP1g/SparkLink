@@ -56,10 +56,10 @@ Admin API 还提供 effective access、policy-only budget、collector heartbeat�
 - root identity 为 `usr_plus_manual_01` / `root`，Plan `Plus`，role `OWNER`，status `active`。
 - root Portal new token 被接受；本轮 superseded Portal token、随机 wrong Portal token、Portal-as-Subscription 均被拒绝。
 - root 当前 Subscription URL 未被 rotate，迁移后仍被接受；随机 wrong Subscription token、Subscription-as-Portal 均被拒绝。
-- Portal 页面已完成真实登录；安全 `/api/me` acceptance 检查确认 root self-scope、`Plus`、`OWNER`、`legacy-pre-baseline` Customer Cycle（`Asia/Shanghai`）以及独立的 `STANDARD`/`ADVANCED`/`PREMIUM` pool rows。尚无 Advanced runtime entry 的环境仍会将其 Usage/Subscription coverage 标为 `Unknown` 或 `not_configured`，不会伪造 traffic。
+- Portal landing page 已通过真实公网浏览器加载；安全 `/api/me` acceptance 检查确认 root self-scope、`Plus`、`OWNER`、`legacy-pre-baseline` Customer Cycle（`Asia/Shanghai`）以及独立的 `STANDARD`/`ADVANCED`/`PREMIUM` pool rows。尚无 Advanced runtime entry 的环境仍会将其 Usage/Subscription coverage 标为 `Unknown` 或 `not_configured`，不会伪造 traffic。将本地受保护 root Portal token 输入浏览器的页面级登录仍需 operator 在 action-time 明确确认；未确认前不把浏览器 session 宣称为完成。
 - Admin metadata list 实际返回 6 个 User。首轮 root Portal issuance/verification 没有 rotate 其它 User；后续六用户 reconcile 只对没有可信 plaintext bundle 的 Hegin、abing、dangbin、liuwen、zhanhao issue 新 credential，并保留各自旧 Subscription grace hash。
 - 六用户 delivery reconciliation 已完成：root 复用可信 Portal/Subscription bundle；Hegin、abing、dangbin、liuwen、zhanhao 各自拥有新的 per-user bundle，旧 Subscription grace hash 保留；OWNER index 只含 User、Plan、bundle path、Portal token status、Subscription status、migration status。
-- 公网 projection 在当前已 admitted runtime 上按 Entitlement 实际验证为 Plus=6 条 vless（STANDARD+PREMIUM）、Basic=2 条 vless（STANDARD）、Free=not_configured；Advanced entry 只有在 Node runtime admission 与 per-user mapping 完成后才会进入 projection。没有 AnyTLS 出现在新 Subscription projection。
+- 公网 projection 在当前已 admitted runtime 上按 Entitlement 实际验证为 root/Hegin 各 6 条 vless（STANDARD+PREMIUM）、abing 4 条 vless（STANDARD+PREMIUM，VMISS deny 生效）、dangbin 2 条 vless（STANDARD）、Free=not_configured；Advanced entry 只有在 DediRock Node runtime admission 与 per-user mapping 完成后才会进入 projection。没有 AnyTLS 出现在新 Subscription projection。
 - 六个 Portal token 的 `/api/me` 均只返回对应 User；跨 User query 仍保持 self-scope，Subscription token 不能作为 Portal credential。
 
 ## Rollback and retention
@@ -68,6 +68,6 @@ Admin API 还提供 effective access、policy-only budget、collector heartbeat�
 
 ## Product Operations reconciliation checkpoint
 
-P0 collector freshness 已通过可回滚的 Task Scheduler start 与新 interval 证实；P2/P3 的 effective access、per-Node Usage、Customer Cycle 与 heartbeat 模型位于 Control Plane management plane，P4/P5 的 OWNER Console 与 append-only migration state 位于本地 operator path。P6 的 provider snapshot importer 只接受 source-labelled authoritative input；缺少 provider API/dashboard evidence 时必须记录 `unknown`，不得从 financial due date 推断 traffic reset，也不得把 provider total 当作 Customer Usage。
+P0 collector freshness 已通过可回滚的 Task Scheduler restart、3/3 one-shot smoke run、正式任务恢复以及新 heartbeat 证实；P2/P3 的 effective access、per-Node Usage、Customer Cycle 与 heartbeat 模型已写入 live Control Plane management plane，P4/P5 的 OWNER Console、六用户 delivery bundles 与 append-only migration state 位于本地 operator path。P6 的 provider snapshot importer 只接受 source-labelled authoritative input；缺少 provider API/dashboard evidence 时必须记录 `unknown`，不得从 financial due date 推断 traffic reset，也不得把 provider total 当作 Customer Usage。
 
 DediRock 当前 live Xray 配置没有可用的 per-user Stats listener/API，且运行时身份增量需要重启 Xray。因该动作可能短暂中断现有 data plane，本 checkpoint 不执行 runtime mutation、不撤销 legacy/shared access、不把 DediRock 标为 current Advanced projection；后续须在明确 maintenance window 内完成 staged config、`xray run -test`、受保护 backup/rollback、restart 后 service/listener/client acceptance，再写入 Control Plane admission。
