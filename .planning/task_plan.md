@@ -1,6 +1,6 @@
 # SparkLink Product / Operations Intent Reconciliation
 
-Status: in_progress (P0-P5 complete with DediRock Advanced admission; P6 provider evidence pending)
+Status: in_progress (P0-P6 management slice complete; authoritative provider telemetry remains pending)
 
 ## Goal
 
@@ -63,12 +63,14 @@ Admission sequence completed: read-only discovery → protected rollback point �
 - Let OWNER perform routine view/copy/inspect directly; require confirmation for rotate/revoke/disable/allowance changes.
 - Retire legacy/shared credentials only after explicit migration confirmation and a fresh verification of the replacement path.
 
-### P6 — Add provider resource adapters and capacity snapshots — importer implemented; authoritative data pending
+### P6 — Add provider resource adapters and capacity snapshots — implemented; authoritative data pending
 
 - Prefer official provider APIs, then documented/stable endpoints, with source and freshness recorded; browser/dashboard automation remains fallback only.
 - Normalize capacity, used, remaining, provider reset window, financial cycle, next due, observed_at, and coverage/status into the management plane.
 - Keep provider totals for capacity/allocation decisions only; never attribute them to User Usage or use them as a quota substitute.
 - Do not let provider adapter failure affect proxy forwarding.
+
+Implementation checkpoint: four provider adapters (RackNerd, VMISS, QQGNet, DediRock) now share a strict normalized snapshot contract and source priority. `deploy/collect_provider_snapshots.py` reads the local resource inventory, accepts only non-secret trusted exports, and records explicit `unknown` snapshots when no authorized source is configured. The live run recorded four `unknown / 4 recorded / 0 failed` management snapshots; no runtime or data-plane change occurred. Admin Infrastructure reads the latest local snapshot and does not synchronously call providers.
 
 ### P7 — Quota/enforcement only after coverage is proven
 

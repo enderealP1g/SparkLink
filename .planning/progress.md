@@ -64,3 +64,10 @@ Product Owner approved autonomous construction of P0-P6 on 2026-08-29. P0 is com
 - Isolated client acceptance passed 4/4 through temporary Xray clients and real public HTTPS requests. Control Plane admission is idempotent: four managed credentials and four Advanced projections were registered, then the rerun reused all eight records and corrected the node display name to `DediRock Advanced serving Node` without creating duplicate membership.
 - Refreshed all six protected delivery bundles without rotating any User token. Public projection checks passed for the four eligible Users (7/7/5/3 entries as applicable), root OWNER self-scope passed, and Free Users remained not configured. Legacy/shared access was unchanged.
 - Restarted the Windows collector task so it loaded the four-node config. Formal collector evidence is `attempted=4`, `ingested=3`, `unknown=1`, `failed=0`; DediRock coverage and Advanced Usage remain `Unknown`, with no synthetic zero or aggregate attribution.
+
+## 2026-08-30 — Provider telemetry adapter checkpoint
+
+- Added `src/sparklink_provider_telemetry.py`, `deploy/collect_provider_snapshots.py`, strict single-snapshot validation, provider adapter registry, non-secret example schema, and provider operations documentation.
+- Live `--dry-run` resolved the four existing resources. Live collection appended four `unknown` snapshots (`4 recorded / 0 failed`) because no authorized official API, stable endpoint, or dashboard export is configured. No proxy/runtime mutation occurred; provider reset/capacity/usage remain unknown.
+- Admin Console now shows each inventory resource even when its latest snapshot is missing/unknown, including source and observed time, and shows per-pool/per-node usage plus per-user delivery availability in the main OWNER table.
+- Deployed the final Control Plane snapshot validation to QQG with protected backup `/var/backups/sparklink-control-plane/provider-telemetry-20260830T051442Z`; live source SHA matched the local candidate, target remained `sparklink:sparklink 0640`, health stayed `ok`, and Xray/Nginx/WireProxy remained active.

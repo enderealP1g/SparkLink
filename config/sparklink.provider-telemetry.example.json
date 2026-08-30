@@ -1,0 +1,34 @@
+{
+  "schema": "sparklink.provider-telemetry.v1",
+  "source_priority": [
+    "official_api",
+    "stable_endpoint",
+    "dashboard_export"
+  ],
+  "providers": [
+    {"key": "racknerd", "provider_name": "RackNerd", "source_status": "not_configured"},
+    {"key": "vmiss", "provider_name": "VMISS", "source_status": "not_configured"},
+    {"key": "qqgnet", "provider_name": "QQGNet", "source_status": "not_configured"},
+    {"key": "dedirock", "provider_name": "DediRock", "source_status": "not_configured"}
+  ],
+  "snapshot_file_shape": {
+    "schema": "sparklink.provider-telemetry.v1",
+    "snapshots": [
+      {
+        "resource_id": "<existing-resource-id>",
+        "observed_at": "<ISO-8601-with-timezone>",
+        "source": "<provider-api-or-dashboard-export>",
+        "status": "available",
+        "capacity_bytes": 0,
+        "used_bytes": 0,
+        "remaining_bytes": 0,
+        "resource_cycle_start": "<authoritative-provider-time-or-null>",
+        "resource_cycle_end": "<authoritative-provider-time-or-null>",
+        "next_reset_at": "<authoritative-provider-time-or-null>",
+        "financial_cycle": "<provider-financial-cycle-or-null>",
+        "next_due_at": "<authoritative-provider-time-or-null>",
+        "detail": "<source and freshness note>"
+      }
+    ]
+  }
+}

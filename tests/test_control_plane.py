@@ -851,6 +851,36 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(overview["provider_resource_snapshots"][0]["source"], "test provider API")
         self.assertEqual(overview["collector_heartbeats"][0]["status"], "completed")
 
+    def test_provider_snapshot_status_cannot_hide_incomplete_or_inconsistent_telemetry(self):
+        self.cp.upsert_infrastructure_resource({
+            "resource_id": "snapshot-resource",
+            "provider_name": "TestProvider",
+            "provider_instance_id": "snapshot-instance",
+            "location": "test",
+            "network_label": "test",
+            "local_timezone": "Etc/UTC",
+            "timezone_source": "test",
+            "resource_cycle_status": "unknown",
+            "resource_cycle_source": "test",
+        })
+        with self.assertRaises(ControlPlaneError):
+            self.cp.record_provider_resource_snapshot({
+                "resource_id": "snapshot-resource", "status": "unknown",
+                "observed_at": "2026-09-02T00:00:00Z", "source": "test", "used_bytes": 0,
+            })
+        with self.assertRaises(ControlPlaneError):
+            self.cp.record_provider_resource_snapshot({
+                "resource_id": "snapshot-resource", "status": "available",
+                "observed_at": "2026-09-02T00:00:00Z", "source": "test",
+                "capacity_bytes": 100, "used_bytes": 40, "remaining_bytes": 40,
+            })
+        with self.assertRaises(ControlPlaneError):
+            self.cp.record_provider_resource_snapshot({
+                "resource_id": "snapshot-resource", "status": "unknown",
+                "observed_at": "2026-09-02T00:00:00Z", "source": "test",
+                "detail": "access_token=must-not-enter",
+            })
+
 
 if __name__ == "__main__":
     unittest.main()

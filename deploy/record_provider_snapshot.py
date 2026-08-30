@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from deploy import issue_user_tokens as operator  # noqa: E402
+from src.sparklink_provider_telemetry import ProviderTelemetryError, normalize_snapshot  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
             snapshot = json.load(sys.stdin)
         if not isinstance(snapshot, dict):
             raise operator.OperatorError("snapshot_invalid")
+        try:
+            snapshot = normalize_snapshot(snapshot)
+        except ProviderTelemetryError as exc:
+            raise operator.OperatorError(exc.args[0] or "snapshot_invalid") from exc
         admin_token = operator._admin_token(Path(args.secret_path))
         with operator.selected_endpoint(args) as endpoint:
             result = operator.admin_json(

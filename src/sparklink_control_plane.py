@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -1216,12 +1217,30 @@ class ControlPlane:
         required = {"resource_id", "observed_at", "source", "status"}
         if not required.issubset(snapshot):
             raise ControlPlaneError("provider snapshot fields are incomplete")
+        allowed = required | {
+            "snapshot_id", "capacity_bytes", "used_bytes", "remaining_bytes",
+            "resource_cycle_start", "resource_cycle_end", "next_reset_at",
+            "financial_cycle", "next_due_at", "detail",
+        }
+        if set(snapshot) - allowed:
+            raise ControlPlaneError("provider snapshot fields are not allowed")
+        if (not isinstance(snapshot["resource_id"], str) or not snapshot["resource_id"].strip()
+                or not isinstance(snapshot["source"], str) or not snapshot["source"].strip()):
+            raise ControlPlaneError("provider snapshot source/resource is invalid")
         status = str(snapshot["status"])
         if status not in {"available", "stale", "unknown", "unavailable"}:
             raise ControlPlaneError("invalid provider snapshot status")
         observed_at = normalize_time(str(snapshot["observed_at"]))
-        if observed_at is None or not str(snapshot["source"]).strip():
+        if observed_at is None:
             raise ControlPlaneError("provider snapshot source/time is invalid")
+        detail = snapshot.get("detail", "")
+        if detail is None:
+            detail = ""
+        if not isinstance(detail, str) or re.search(
+                r"(?i)(?:vless|anytls)://|-----BEGIN [^-]*PRIVATE KEY-----|"
+                r"\b(?:bearer|access[_-]?token|subscription[_-]?token|password|secret|private[_-]?key)\b\s*[:=]",
+                detail):
+            raise ControlPlaneError("provider snapshot detail must not contain credentials")
         numeric_fields = ("capacity_bytes", "used_bytes", "remaining_bytes")
         numeric: dict[str, int | None] = {}
         for field in numeric_fields:
@@ -1236,6 +1255,20 @@ class ControlPlane:
             if value and normalized is None:
                 raise ControlPlaneError("provider snapshot timestamp is invalid")
             times[field] = normalized
+        byte_values = tuple(numeric[field] for field in numeric_fields)
+        if status == "available" and any(value is None for value in byte_values):
+            raise ControlPlaneError("available provider snapshot requires complete byte fields")
+        if status in {"unknown", "unavailable"}:
+            if any(value is not None for value in byte_values):
+                raise ControlPlaneError("unknown provider snapshot must not contain byte values")
+            if any(times[field] is not None for field in times) or snapshot.get("financial_cycle") is not None:
+                raise ControlPlaneError("unknown provider snapshot must not contain cycle values")
+        if any(value is not None for value in byte_values) and any(value is None for value in byte_values):
+            raise ControlPlaneError("provider snapshot byte fields are incomplete")
+        if all(value is not None for value in byte_values):
+            capacity, used, remaining = (int(value) for value in byte_values)
+            if used > capacity or remaining != capacity - used:
+                raise ControlPlaneError("provider snapshot byte fields are inconsistent")
         snapshot_id = str(snapshot.get("snapshot_id") or f"ps_{uuid.uuid4().hex}")
         with self.connect() as db:
             if db.execute(
@@ -1251,7 +1284,7 @@ class ControlPlane:
                 (snapshot_id, str(snapshot["resource_id"]), numeric["capacity_bytes"], numeric["used_bytes"],
                  numeric["remaining_bytes"], times["resource_cycle_start"], times["resource_cycle_end"],
                  times["next_reset_at"], snapshot.get("financial_cycle"), times["next_due_at"],
-                 observed_at, str(snapshot["source"])[:200], status, str(snapshot.get("detail", ""))[:500],
+                  observed_at, snapshot["source"][:200], status, detail[:500],
                  utc_now()),
             )
         return snapshot_id

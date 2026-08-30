@@ -125,6 +125,30 @@ class ConsoleApp:
     def state(self) -> dict:
         users = self._safe_users()
         overview = operator.admin_json(self.endpoint, self.admin_token, "/api/admin/overview", "GET")
+        overview_users = overview.get("users")
+        if isinstance(overview_users, list):
+            details_by_id = {
+                item.get("user_id"): item for item in overview_users
+                if isinstance(item, dict) and isinstance(item.get("user_id"), str)
+            }
+            # The Admin users endpoint is the validated identity source. The
+            # overview contributes only safe, read-oriented usage/access
+            # metadata so the OWNER table can answer per-pool/per-node status
+            # without exposing any credential-bearing fields.
+            users = [
+                {
+                    **user,
+                    **{
+                        key: details_by_id[user["user_id"]][key]
+                        for key in (
+                            "usage_by_pool_bytes", "usage_by_node", "usage_bytes",
+                            "effective_access", "migration_latest",
+                        )
+                        if user["user_id"] in details_by_id and key in details_by_id[user["user_id"]]
+                    },
+                }
+                for user in users
+            ]
         delivery = {}
         for user in users:
             path = operator.user_bundle_path(user["display_name"], self.delivery_dir)

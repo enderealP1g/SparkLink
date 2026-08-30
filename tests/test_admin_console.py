@@ -51,7 +51,10 @@ class AdminConsoleTests(unittest.TestCase):
         self.assertNotIn(b"sub-secret-test", page)
         with patch.object(self.app, "_safe_users", return_value=[self.user]), \
              patch.object(admin_console.operator, "admin_json", side_effect=lambda endpoint, token, path, method, body=None: (
-                 {"nodes": [], "users": [], "unresolved_usage_records": 0,
+                 {"nodes": [], "users": [{**self.user, "usage_by_pool_bytes": {"STANDARD": 12},
+                                            "usage_by_node": [{"node_id": "node-a", "used_bytes": 12}],
+                                            "usage_bytes": 12, "effective_access": [], "migration_latest": []}],
+                  "unresolved_usage_records": 0,
                   "provider_resource_snapshots": [], "collector_heartbeats": []}
                  if path == "/api/admin/overview" else {"ok": True}
              )):
@@ -60,6 +63,7 @@ class AdminConsoleTests(unittest.TestCase):
         self.assertNotIn("portal-secret-test", encoded)
         self.assertNotIn("sub-secret-test", encoded)
         self.assertTrue(state["delivery"]["usr_root"]["portal_available"])
+        self.assertEqual(state["users"][0]["usage_by_node"][0]["used_bytes"], 12)
 
     def test_copy_is_local_only_and_response_contains_no_secret(self):
         with patch.object(self.app, "_safe_users", return_value=[self.user]), \
