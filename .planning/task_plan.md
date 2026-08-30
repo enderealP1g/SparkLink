@@ -1,6 +1,6 @@
 # SparkLink Product / Operations Intent Reconciliation
 
-Status: in_progress (P0-P6 management slice complete; authoritative provider telemetry remains pending)
+Status: in_progress (P0-P6 management slice and dual Origin/HyTru node slice complete; authoritative provider telemetry remains pending)
 
 ## Goal
 
@@ -73,6 +73,21 @@ Admission sequence completed: read-only discovery → protected rollback point �
 Implementation checkpoint: four provider adapters (RackNerd, VMISS, QQGNet, DediRock) now share a strict normalized snapshot contract and source priority. `deploy/collect_provider_snapshots.py` reads the local resource inventory, accepts only non-secret trusted exports, and records explicit `unknown` snapshots when no authorized source is configured. The live run recorded four `unknown / 4 recorded / 0 failed` management snapshots; no runtime or data-plane change occurred. Admin Infrastructure reads the latest local snapshot and does not synchronously call providers.
 
 Implementation checkpoint: current personal VLESS projection aliases now follow the shared user-facing naming system (`Pro-LA-01/02`, `Standard-NY`, and route-specific `Advanced-LA-{Origin|HyTru}-Direct-Reality` forms). The current DediRock managed path is explicitly routed through WARP/HyTru, so its canonical alias is `Advanced-LA-HyTru-Direct-Reality`; the previous Origin and user-specific forms are migration inputs. VeilShift labels are preserved. An Admin-only fragment update workflow is transactional, entry-id scoped, and verifies that URI core fields remain unchanged.
+
+### P6b — Restore dual Origin(native) and HyTru egress per node — complete
+
+- Reconcile the current runtime and projection inventory so every eligible node exposes separate `Origin(native)` and `HyTru` variants; preserve the already-fixed VeilShift naming and capability semantics.
+- Add DediRock's separate native/direct route alongside the existing exact-user HyTru/WARP route, with distinct user-facing aliases and no credential or route conflation.
+- Keep Access, Metering, and Quota independent; do not synthesize Usage and do not enable hard quota. Preserve legacy/shared access and create a protected rollback point before runtime mutation.
+- Rebuild and verify public projections without rotating tokens unnecessarily; accept both route variants from isolated clients and confirm URI core/identity isolation.
+- Run regression, secret scan, ignored-runtime verification, and commit/push only after the live dual-route acceptance is complete.
+
+Implementation checkpoint: DediRock now has four managed HyTru identities routed to
+WARP and four distinct managed Origin identities routed to its native/direct
+outbound. Isolated acceptance passed 8/8, the Control Plane has eight current
+DediRock entries, and public projections expose both canonical aliases for every
+eligible configured node. The six protected delivery bundles were reconciled
+without unnecessary token rotation; legacy access and hard quota remain unchanged.
 
 ### P7 — Quota/enforcement only after coverage is proven
 

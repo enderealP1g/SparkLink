@@ -6,10 +6,10 @@
 
 | Item | Evidence |
 | --- | --- |
-| Runtime path | Direct `dedirock.enrpiglink.top:443` Xray VLESS Reality ingress with managed HyTru/WARP egress |
+| Runtime path | Direct `dedirock.enrpiglink.top:443` Xray VLESS Reality ingress with separate native/direct and HyTru/WARP egress |
 | Managed Users | `root`, `Hegin`, `abing`, `dangbin` |
-| Runtime identity action | Four existing stable managed identities reused; no unnecessary rotate/restart |
-| Isolated client acceptance | 4/4 real transient Xray clients completed public HTTPS request |
+| Runtime identity action | Four existing stable HyTru identities reused; four separate Origin identities added |
+| Isolated client acceptance | 8/8 real transient Xray clients: Origin `warp=off`, HyTru `warp=on` |
 | Control Plane | DediRock `active/verified`, `ADVANCED`, VLESS access/subscription allowed |
 | Metering | `Unknown`; no per-user Stats source is available |
 | Quota | `unavailable`; 700GB remains policy-only |
@@ -18,10 +18,12 @@
 After admission, a read-only route audit found that the four managed Advanced
 identities were not covered by the existing static HyTru rules and all four
 isolated checks observed `warp=off`. The reversible repair command added one
-exact-user `outboundTag=warp` rule without changing the old clients or static
-Origin/HyTru rules. Xray configuration validation and service recovery passed;
-four fresh isolated public checks then observed `warp=on`. A second run was
-idempotent and reported no config change.
+exact-user `outboundTag=warp` rule. The dual-route operation then added four
+separate Origin identities and one exact-user `outboundTag=direct` rule. Xray
+configuration validation and service recovery passed; eight fresh isolated
+public checks observed the expected route identity (`warp=off` for Origin,
+`warp=on` for HyTru). A second run was idempotent and reused the existing
+runtime identities.
 
 The route rollback artifact is root-only at
 `/var/backups/sparklink-identity-migration/20260830T070546Z-dedirock-hytru-route/xray-config.json`
@@ -30,7 +32,13 @@ confirmed that only the routing section changed; all clients, outbounds, and
 other top-level configuration remained equal. Xray, Nginx, and sing-box were
 active after acceptance.
 
-The admission runner is idempotent. Its first successful Control Plane registration created four managed credentials and four current Advanced projection entries; a follow-up run reused all eight records and did not create duplicate active membership. Runtime identities are keyed by stable managed Xray email references; the Control Plane stores only the corresponding reference hashes.
+The admission runner is idempotent. The initial Control Plane registration
+created four managed HyTru credentials and four current Advanced projection
+entries. The dual-route operation added four separate Origin credentials and
+four current Advanced projection entries; a follow-up run reused all sixteen
+runtime/projection records and did not create duplicate active membership.
+Runtime identities are keyed by stable managed Xray email references; the
+Control Plane stores only the corresponding reference hashes.
 
 ## Protected rollback evidence
 
@@ -50,10 +58,10 @@ After admission and six-bundle refresh, the current public personal projections 
 
 | User | Plan | Current VLESS entries | DediRock Advanced | Usage |
 | --- | --- | ---: | --- | --- |
-| root | Plus | 7 | present | Unknown |
-| Hegin | Plus | 7 | present | Unknown |
-| abing | Plus | 5 | present | Unknown |
-| dangbin | Basic | 3 | present | Unknown |
+| root | Plus | 8 | present (Origin + HyTru) | Unknown |
+| Hegin | Plus | 8 | present (Origin + HyTru) | Unknown |
+| abing | Plus | 6 | present (Origin + HyTru) | Unknown |
+| dangbin | Basic | 4 | present (Origin + HyTru) | Unknown |
 | liuwen | Free | 0 / not configured | absent | Not applicable |
 | zhanhao | Free | 0 / not configured | absent | Not applicable |
 
@@ -67,6 +75,8 @@ From the repository root on the Windows control machine:
 python deploy\admit_dedirock.py
 python deploy\repair_dedirock_hytru.py preview
 python deploy\repair_dedirock_hytru.py apply
+python deploy\ensure_dedirock_dual_routes.py preview
+python deploy\ensure_dedirock_dual_routes.py apply
 python deploy\issue_user_tokens.py reconcile
 python deploy\issue_user_tokens.py copy --user Hegin --kind portal
 python deploy\issue_user_tokens.py copy --user Hegin --kind subscription

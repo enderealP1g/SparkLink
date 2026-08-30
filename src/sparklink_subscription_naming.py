@@ -21,14 +21,15 @@ CANONICAL_PREFIX_BY_NODE = {
     "vmiss": "Pro-LA-01",
     "racknerd": "Standard-NY",
 }
-# DediRock's current managed clients are explicitly routed to the existing
-# `warp` WireGuard outbound, so their user-facing route name is HyTru.  Keep
-# both route spellings recognized as migration inputs; the current managed
-# projection is one route and is normalized to this canonical alias.
-CANONICAL_DEDIROCK_ALIAS = "Advanced-LA-HyTru-Direct-Reality"
+# DediRock exposes two separately managed egress variants. Keep the old
+# singular constant as the HyTru compatibility/default value for admission
+# callers that predate the dual-route projection.
+CANONICAL_DEDIROCK_HYTRU_ALIAS = "Advanced-LA-HyTru-Direct-Reality"
+CANONICAL_DEDIROCK_ORIGIN_ALIAS = "Advanced-LA-Origin-Direct-Reality"
+CANONICAL_DEDIROCK_ALIAS = CANONICAL_DEDIROCK_HYTRU_ALIAS
 CANONICAL_DEDIROCK_ALIASES = frozenset({
-    "Advanced-LA-Origin-Direct-Reality",
-    "Advanced-LA-HyTru-Direct-Reality",
+    CANONICAL_DEDIROCK_ORIGIN_ALIAS,
+    CANONICAL_DEDIROCK_HYTRU_ALIAS,
 })
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CANONICAL_RE = re.compile(
@@ -38,6 +39,17 @@ _LEGACY_RE = re.compile(
     r"^(?:Plus|Basic)-(?P<location>LA|NY)-Xray-VLESS-REALITY-(?P<ordinal>[0-9]+)$"
 )
 _DEDIROCK_RE = re.compile(r"^SparkLink-(?P<user>[A-Za-z0-9_.-]+)-DediRock-Advanced$")
+
+
+def dedirock_alias(route: str) -> str:
+    """Return the canonical DediRock alias for one explicit egress route."""
+
+    value = str(route or "").strip().lower()
+    if value == "origin":
+        return CANONICAL_DEDIROCK_ORIGIN_ALIAS
+    if value == "hytru":
+        return CANONICAL_DEDIROCK_HYTRU_ALIAS
+    raise SubscriptionNamingError("dedirock_route_unrecognized")
 
 
 def _decoded_alias(value: str) -> str:
@@ -64,8 +76,9 @@ def canonical_alias(node_id: str, current_alias: str) -> str:
         return alias
 
     if node == "dedirock":
-        if (alias in CANONICAL_DEDIROCK_ALIASES
-                or alias == "SparkLink-DediRock-Advanced"
+        if alias in CANONICAL_DEDIROCK_ALIASES:
+            return alias
+        if (alias == "SparkLink-DediRock-Advanced"
                 or _DEDIROCK_RE.fullmatch(alias)):
             return CANONICAL_DEDIROCK_ALIAS
         raise SubscriptionNamingError("dedirock_alias_unrecognized")

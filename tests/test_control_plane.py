@@ -843,6 +843,47 @@ class ControlPlaneTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM subscription_entries WHERE node_id='dedirock'"
             ).fetchone()[0], 0)
 
+    def test_managed_runtime_admission_allows_distinct_egress_credentials_on_one_node(self):
+        first = {
+            "user_id": "usr_test",
+            "runtime_ref_hash": "b" * 64,
+            "runtime_family": "xray",
+            "protocol": "vless",
+            "credential_kind": "managed",
+            "uri": "vless://44444444-4444-4444-8444-444444444444@dedirock.example#Origin",
+            "minimum_plan": "Basic",
+        }
+        second = {
+            "user_id": "usr_test",
+            "runtime_ref_hash": "c" * 64,
+            "runtime_family": "xray",
+            "protocol": "vless",
+            "credential_kind": "managed",
+            "uri": "vless://55555555-5555-4555-8555-555555555555@dedirock.example#HyTru",
+            "minimum_plan": "Basic",
+        }
+        self.cp.admit_node(
+            "dedirock", "ADVANCED", metering_status="unknown",
+            source="test-dual-route", detail="dual route fixture",
+        )
+        self.cp.set_entitlement("usr_test", "ADVANCED", "Plus", None)
+        result = self.cp.admit_runtime_entries(
+            "dedirock", "ADVANCED", [first], source="test-dual-route",
+        )
+        self.assertEqual(result["subscriptions_created"], 1)
+        result = self.cp.admit_runtime_entries(
+            "dedirock", "ADVANCED", [second], source="test-dual-route",
+        )
+        self.assertEqual(result["credentials_created"], 1)
+        self.assertEqual(result["subscriptions_created"], 1)
+        with self.cp.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM credentials WHERE node_id='dedirock'"
+            ).fetchone()[0], 2)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM subscription_entries WHERE node_id='dedirock'"
+            ).fetchone()[0], 2)
+
     def test_policy_budget_cannot_become_hard_enforcement_and_migration_is_append_only(self):
         budget = self.cp.set_operational_budget(
             "usr_test", 200 * 1024 ** 3, node_id="hypro02", pool_id="PREMIUM",

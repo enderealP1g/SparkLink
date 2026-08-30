@@ -1022,12 +1022,18 @@ class ControlPlane:
                         subscription_reused += 1
                         continue
 
+                # A single Node may intentionally expose more than one
+                # managed credential for distinct egress variants (for
+                # example Origin/native and HyTru). The credential identity
+                # is the disambiguator; only an unbound current projection
+                # remains a conflict because it cannot be safely associated
+                # with this managed runtime identity.
                 conflict = db.execute(
                     """SELECT entry_id FROM subscription_entries
                        WHERE user_id=? AND node_id=? AND pool_id=? AND protocol=?
                          AND projection_status='current' AND enabled=1
-                         AND (credential_id IS NULL OR credential_id<>?)""",
-                    (item["user_id"], node_id, pool_id, item["protocol"], credential_id),
+                         AND credential_id IS NULL""",
+                    (item["user_id"], node_id, pool_id, item["protocol"]),
                 ).fetchone()
                 if conflict is not None:
                     raise Conflict("runtime admission has a conflicting current projection")

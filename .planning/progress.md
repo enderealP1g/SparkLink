@@ -97,3 +97,70 @@ Product Owner approved autonomous construction of P0-P6 on 2026-08-29. P0 is com
   `/var/backups/sparklink-identity-migration/20260830T070546Z-dedirock-hytru-route/xray-config.json`
   with root-only `0700/0600` protection; structural comparison confirmed that
   only routing changed and all three DediRock services remained active.
+
+## 2026-08-30 — dual Origin/native and HyTru route slice
+
+- Product Owner clarified that each eligible user-facing node must expose both
+  `Origin(native)` and `HyTru`; this is a routing/projection correction, not a
+  new Plan or quota feature.
+- Added the canonical DediRock Origin alias while preserving the existing
+  HyTru compatibility alias. The admission URI builder now supports an
+  explicit route without changing URI core fields for existing entries.
+- Added `deploy/ensure_dedirock_dual_routes.py`: read-only discovery/preview,
+  SHA-guarded DediRock identity and routing apply, root-only rollback backup,
+  Xray validation/restart, isolated Origin/HyTru Cloudflare acceptance, and
+  Control Plane projection/delivery reconciliation. It never prints UUIDs,
+  URI values, or token plaintext.
+- Added focused tests for dual-route planning, identity reuse, fail-closed
+  missing HyTru state, remote script compilation, and safe output. Focused
+  result: 15 tests passed.
+- Live apply has not started yet; next checkpoint is the live preview and
+  protected dual-route acceptance.
+- Live preview passed with four existing HyTru identities, zero Origin
+  identities, and four planned Origin additions. The first apply attempt did
+  not return a structured remote response (`remote_response_invalid`); no
+  retry was made. Immediate read-only state inspection is required to
+  determine whether the remote mutation happened before transport closure.
+- The first DediRock dual-route apply did mutate the runtime despite losing
+  its final JSON response; read-only preview and independent 8/8 route checks
+  confirmed the resulting state. A subsequent idempotent apply reached the
+  Control Plane and returned HTTP 409 because runtime admission rejected a
+  second managed credential for the same User/Node/Pool/protocol.
+- Local Control Plane admission was updated and 60 focused tests passed. The
+  first protected live Control Plane deployment attempt failed and restored
+  the prior source/service state (`rolled_back=true`); a read-only health/hash
+  check and step-specific diagnosis are required before another deployment.
+- Step-specific deployment diagnosis showed the candidate write and compile
+  succeeded, but the immediate post-restart `/healthz` probe ran before the
+  service HTTP listener was ready; the deployment rolled back cleanly. The
+  next deployment must wait/retry the health probe after `systemctl` reports
+  active rather than treating the first connection gap as a bad candidate.
+- The Control Plane deployment was then repeated with a bounded health retry;
+  candidate compile, service recovery, and `/healthz` passed. Protected
+  rollback copy: `/var/backups/sparklink-control-plane/20260830T080119Z-dual-egress-admission/sparklink_control_plane.py`.
+- Idempotent dual-route admission completed: DediRock runtime acceptance was
+  8/8 (Origin `warp=off`, HyTru `warp=on`), four Origin credentials and four
+  Origin projections were created, and the existing four HyTru records were
+  reused. Public delivery reconciliation passed with root/Hegin 8 entries,
+  abing 6, dangbin 4, and Free Users not configured.
+- Fresh naming preview reported 28 current VLESS entries, 26 public projected
+  entries, and zero alias changes. Root OWNER acceptance passed again with
+  Plus/OWNER, `legacy-pre-baseline`, all three independent pools, and
+  self-scoped `/api/me`; wrong and cross-kind token checks were rejected.
+- Live database remains hash-only with six active Users and eight active
+  DediRock credentials/current entries. DediRock Xray/Nginx/sing-box and the
+  QQG Control Plane health check are active; no legacy access or hard quota was
+  changed.
+
+## 2026-08-30 — dual egress release gate
+
+- Final regression passed: 84 tests, `compileall` for `src`, `deploy`, and
+  `tests`, and `git diff --check` all passed.
+- Final repository secret scan passed for live-secret patterns. The only
+  pattern inventory entries were seven synthetic VLESS UUIDs in two test
+  fixtures; no production credential value was emitted or found in changed
+  non-test files.
+- `runtime/delivery` remains ignored and untracked (`0` tracked files); the
+  six protected bundles and OWNER-only index remain local runtime artifacts.
+- P6b is ready for commit/push. P7 hard quota and automatic blocking remain
+  unauthorized and unchanged.

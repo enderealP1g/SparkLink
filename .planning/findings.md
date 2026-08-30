@@ -129,3 +129,26 @@ Evidence date: 2026-08-29. Evidence sources were re-read from the checked-out `m
   (`root:root`, file `0600`, parent directory `0700`). A before/after
   structural comparison found only the routing rule changed; Xray, Nginx, and
   sing-box remained active.
+
+## 2026-08-30 — dual egress reconciliation
+
+- Product Owner clarified that every eligible user-facing node must expose two
+  distinct route variants: `Origin(native)` and `HyTru`; the already-fixed
+  VeilShift naming/semantics remain unchanged.
+- Current Control Plane projections already contain both variants for the
+  existing QQG/VMISS/RackNerd VLESS node families. DediRock is the exception:
+  each of the four eligible users currently has exactly one `ADVANCED` entry,
+  named `Advanced-LA-HyTru-Direct-Reality`.
+- Fresh DediRock inspection confirmed both `direct` (`freedom`) and `warp`
+  (`wireguard`) outbounds exist, but all four managed Reality identities
+  (`sparklink:<user>:advanced`) are selected by one exact `warp` route rule.
+  Therefore the missing `Advanced-Origin` item is a real runtime/projection
+  gap, not a v2rayN refresh problem.
+- The safe extension is to preserve the existing identity as the HyTru path,
+  add one separately identified managed Origin identity per eligible user,
+  route those identities to `direct`, and add one matching Control Plane
+  credential/subscription entry per user. Existing legacy/shared access and
+  current HyTru entries must remain untouched.
+- Free users remain outside the Advanced entitlement. The `abing` VMISS deny
+  policy remains in force; dual-route coverage means every currently allowed
+  node for each eligible Plan/user, not an override of access policy.

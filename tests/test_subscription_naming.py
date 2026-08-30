@@ -5,9 +5,11 @@ from deploy import standardize_subscription_names as standardizer
 from src.sparklink_subscription_naming import (
     CANONICAL_DEDIROCK_ALIAS,
     CANONICAL_DEDIROCK_ALIASES,
+    CANONICAL_DEDIROCK_ORIGIN_ALIAS,
     SubscriptionNamingError,
     alias_from_uri,
     canonical_alias,
+    dedirock_alias,
     replace_uri_alias,
     uri_core,
 )
@@ -40,7 +42,7 @@ class SubscriptionNamingTests(unittest.TestCase):
         )
         self.assertEqual(
             canonical_alias("dedirock", "Advanced-LA-Origin-Direct-Reality"),
-            "Advanced-LA-HyTru-Direct-Reality",
+            CANONICAL_DEDIROCK_ORIGIN_ALIAS,
         )
         self.assertEqual(
             CANONICAL_DEDIROCK_ALIASES,
@@ -49,6 +51,8 @@ class SubscriptionNamingTests(unittest.TestCase):
                 "Advanced-LA-HyTru-Direct-Reality",
             }),
         )
+        self.assertEqual(dedirock_alias("origin"), CANONICAL_DEDIROCK_ORIGIN_ALIAS)
+        self.assertEqual(dedirock_alias("hytru"), CANONICAL_DEDIROCK_ALIAS)
         veilshift = "VeilShift-Optimized"
         self.assertEqual(canonical_alias("unknown-node", veilshift), veilshift)
 
