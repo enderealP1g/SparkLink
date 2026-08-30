@@ -1,6 +1,6 @@
 # SparkLink Product / Operations Intent Reconciliation
 
-Status: in_progress (P0 complete; P1 management-plane slice complete; P1 runtime admission remains gated; P2-P5 live checkpoint complete; P6 authoritative provider evidence pending)
+Status: in_progress (P0 complete; P1 management-plane slice complete; P1 runtime admission remains gated; P2-P5 and root Portal acceptance complete; P6 authoritative provider evidence pending)
 
 ## Goal
 
