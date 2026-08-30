@@ -28,6 +28,8 @@
     <p id="sub-link"></p>
     <h2>Usage</h2>
     <table><thead><tr><th>Resource Pool</th><th>Used</th><th>Allowance</th><th>Remaining</th><th>Coverage</th></tr></thead><tbody id="pools"></tbody></table>
+    <h2>Usage by Node</h2>
+    <table><thead><tr><th>Node</th><th>Pool</th><th>Allocation</th><th>Used</th><th>Coverage</th></tr></thead><tbody id="nodes"></tbody></table>
     <h2>Upgrade</h2>
     <select id="upgrade"><option>Basic</option><option>Plus</option></select><button id="request">发起 upgrade request</button>
     <p id="upgrade-result" class="muted"></p>
@@ -50,6 +52,8 @@
       q('total').textContent = bytes(data.total_usage_bytes);
       q('sub-link').innerHTML = data.subscription_url ? `Subscription: <a href="${data.subscription_url}">获取 V2rayN/V2rayNG subscription</a>` : 'Subscription: Not configured';
       q('pools').innerHTML = data.pools.map(p => `<tr><td>${p.pool_id}</td><td>${bytes(p.used_bytes)}</td><td>${bytes(p.allowance_bytes)}</td><td>${bytes(p.remaining_bytes)}</td><td class="${p.coverage_status === 'available' ? 'ok' : 'warn'}">${p.coverage_status}</td></tr>`).join('');
+      const nodeRows = data.pools.flatMap(p => (p.usage_by_node || []).map(n => ({...n, pool_id: p.pool_id})));
+      q('nodes').innerHTML = nodeRows.length ? nodeRows.map(n => `<tr><td>${n.node_name} (${n.node_id})</td><td>${n.pool_id}</td><td>${n.allocation_role}</td><td>${bytes(n.used_bytes)}</td><td class="${n.coverage_status === 'available' ? 'ok' : 'warn'}">${n.coverage_status}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">No personal runtime Node mapping</td></tr>';
       q('upgrade-result').textContent = data.latest_upgrade_request ? `Latest request: ${data.latest_upgrade_request.status}` : '';
     }
     q('load').onclick = loadView;

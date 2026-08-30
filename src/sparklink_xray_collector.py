@@ -271,6 +271,25 @@ def post_coverage(endpoint: str, admin_token: str, node_id: str, status: str, de
     )
 
 
+def post_heartbeat(endpoint: str, admin_token: str, summary: dict) -> dict:
+    failed = int(summary.get("failed", 0))
+    unknown = int(summary.get("unknown", 0))
+    status = "failed" if failed and not summary.get("ingested") else ("degraded" if failed or unknown else "completed")
+    return _request_json(
+        endpoint, admin_token, "/api/admin/collector-heartbeat",
+        {
+            "collector_id": "windows-xray-stats-collector",
+            "status": status,
+            "attempted_nodes": int(summary.get("attempted", 0)),
+            "ingested_nodes": int(summary.get("ingested", 0)),
+            "failed_nodes": failed,
+            "source": "windows-task-scheduler",
+            "detail": f"unknown={unknown}",
+            "observed_at": utc_now(),
+        },
+    )
+
+
 def _safe_error(exc: Exception) -> str:
     if isinstance(exc, CollectorError):
         return exc.code
@@ -398,6 +417,12 @@ def run_service(config: dict, endpoint: str, admin_token: str, interval_seconds:
     try:
         while not stop_event.is_set():
             summary = run_once(config, endpoint, admin_token)
+            try:
+                post_heartbeat(endpoint, admin_token, summary)
+            except Exception:
+                # Coverage records remain the per-Node fallback; a heartbeat
+                # failure must not stop proxy-independent collection cycles.
+                pass
             print(json.dumps({"event": "collector_cycle", **summary}, separators=(",", ":")), flush=True)
             stop_event.wait(interval_seconds)
     finally:

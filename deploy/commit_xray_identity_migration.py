@@ -44,7 +44,7 @@ def validate_entry(entry: dict) -> None:
     }
     if not isinstance(entry, dict) or not required.issubset(entry):
         fail("plan_entry_invalid")
-    if entry["protocol"].lower() != "vless" or entry["pool_id"] not in {"STANDARD", "PREMIUM"}:
+    if entry["protocol"].lower() != "vless" or entry["pool_id"] not in {"STANDARD", "ADVANCED", "PREMIUM"}:
         fail("only_xray_vless_is_supported")
     if len(entry["old_runtime_ref_hash"]) != 64 or any(
         char not in "0123456789abcdef" for char in entry["old_runtime_ref_hash"].lower()

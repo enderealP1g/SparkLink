@@ -90,7 +90,7 @@ class TokenOperatorTests(unittest.TestCase):
             "OWNER",
             "cycle-test",
         )
-        self.assertEqual(result["pool_ids"], ["STANDARD", "PREMIUM"])
+        self.assertEqual(result["pool_ids"], ["STANDARD", "ADVANCED", "PREMIUM"])
         self.assertTrue(result["self_scoped"])
 
     def test_public_subscription_projection_checks_status_count_protocol_and_anytls(self):
@@ -101,7 +101,7 @@ class TokenOperatorTests(unittest.TestCase):
                 "Basic",
                 "available",
                 1,
-                ["STANDARD"],
+                ["STANDARD", "ADVANCED"],
                 ["vless"],
                 "https://sub.example.test",
             )
@@ -162,11 +162,11 @@ class TokenOperatorTests(unittest.TestCase):
             apply_acl=False,
         )
         rows = [
-            {"user_id": "usr_abing", "display_name": "abing", "plan": "Plus", "role": "CUSTOMER", "status": "active", "subscription_status": "available", "subscription_entry_count": 6, "subscription_pool_ids": ["STANDARD", "PREMIUM"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
-            {"user_id": "usr_dangbin", "display_name": "dangbin", "plan": "Basic", "role": "CUSTOMER", "status": "active", "subscription_status": "available", "subscription_entry_count": 2, "subscription_pool_ids": ["STANDARD"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
-            {"user_id": "usr_hegin", "display_name": "Hegin", "plan": "Plus", "role": "CUSTOMER", "status": "active", "subscription_status": "available", "subscription_entry_count": 6, "subscription_pool_ids": ["STANDARD", "PREMIUM"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
+            {"user_id": "usr_abing", "display_name": "abing", "plan": "Plus", "role": "CUSTOMER", "status": "active", "subscription_status": "available", "subscription_entry_count": 6, "subscription_pool_ids": ["STANDARD", "ADVANCED", "PREMIUM"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
+            {"user_id": "usr_dangbin", "display_name": "dangbin", "plan": "Basic", "role": "CUSTOMER", "status": "active", "subscription_status": "available", "subscription_entry_count": 2, "subscription_pool_ids": ["STANDARD", "ADVANCED"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
+            {"user_id": "usr_hegin", "display_name": "Hegin", "plan": "Plus", "role": "CUSTOMER", "status": "active", "subscription_status": "available", "subscription_entry_count": 6, "subscription_pool_ids": ["STANDARD", "ADVANCED", "PREMIUM"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
             {"user_id": "usr_liuwen", "display_name": "liuwen", "plan": "Free", "role": "CUSTOMER", "status": "active", "subscription_status": "not_configured", "subscription_entry_count": 0, "subscription_pool_ids": [], "subscription_protocols": [], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
-            {"user_id": "usr_plus_manual_01", "display_name": "root", "plan": "Plus", "role": "OWNER", "status": "active", "subscription_status": "available", "subscription_entry_count": 6, "subscription_pool_ids": ["STANDARD", "PREMIUM"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
+            {"user_id": "usr_plus_manual_01", "display_name": "root", "plan": "Plus", "role": "OWNER", "status": "active", "subscription_status": "available", "subscription_entry_count": 6, "subscription_pool_ids": ["STANDARD", "ADVANCED", "PREMIUM"], "subscription_protocols": ["vless"], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
             {"user_id": "usr_zhanhao", "display_name": "zhanhao", "plan": "Free", "role": "CUSTOMER", "status": "active", "subscription_status": "not_configured", "subscription_entry_count": 0, "subscription_pool_ids": [], "subscription_protocols": [], "subscription_anytls_count": 0, "subscription_legacy_retained": False},
         ]
         issued = iter(

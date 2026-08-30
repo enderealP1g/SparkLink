@@ -43,14 +43,12 @@ DEFAULT_BUNDLE_FILENAME = "delivery.json"
 DEFAULT_INDEX_FILENAME = "OWNER-DELIVERY-INDEX.json"
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 EXPECTED_USERNAMES = {"root", "Hegin", "abing", "dangbin", "liuwen", "zhanhao"}
-PLAN_POOL_IDS = {
-    "Plus": {"STANDARD", "PREMIUM"},
-    "Basic": {"STANDARD"},
-    "Free": set(),
-}
 
 sys.path.insert(0, str(ROOT))
 from src.sparklink_xray_collector import CollectorError, read_dpapi_token  # noqa: E402
+from src.sparklink_control_plane import PLAN_POOL_ENTITLEMENTS, POOL_NAMES  # noqa: E402
+
+PLAN_POOL_IDS = {plan: set(pools) for plan, pools in PLAN_POOL_ENTITLEMENTS.items()}
 
 
 class OperatorError(RuntimeError):
@@ -415,6 +413,20 @@ def admin_json(endpoint: str, admin_token: str, path: str, method: str, body: di
     return value
 
 
+def record_migration_event(endpoint: str, admin_token: str, user_id: str,
+                           subject_kind: str, state: str, detail: str) -> bool:
+    """Best-effort append-only delivery state; never carries a secret."""
+    try:
+        value = admin_json(
+            endpoint, admin_token, "/api/admin/migration-event", "POST",
+            {"user_id": user_id, "subject_kind": subject_kind, "subject_ref": "current",
+             "state": state, "source": "protected-delivery-operator", "detail": detail},
+        )
+    except OperatorError:
+        return False
+    return value.get("user_id") == user_id and value.get("state") == state
+
+
 def read_admin_users(endpoint: str, admin_token: str) -> list[dict]:
     value = admin_json(endpoint, admin_token, "/api/admin/users", "GET")
     users = value.get("users")
@@ -595,7 +607,7 @@ def verify_portal_view(
     if not isinstance(pools, list):
         raise OperatorError("acceptance_pools_missing")
     pool_ids = [pool.get("pool_id") for pool in pools if isinstance(pool, dict)]
-    if len(pool_ids) != 2 or set(pool_ids) != {"STANDARD", "PREMIUM"}:
+    if len(pool_ids) != len(POOL_NAMES) or set(pool_ids) != set(POOL_NAMES):
         raise OperatorError("acceptance_pools_not_independent")
     if "users" in value:
         raise OperatorError("acceptance_self_scope_failed")
@@ -872,6 +884,9 @@ def reconcile(args: argparse.Namespace) -> int:
                     user["subscription_protocols"],
                     public_subscription_base_url,
                 )
+            for subject_kind in ("portal_token", "subscription_token"):
+                record_migration_event(endpoint, admin_token, user["user_id"], subject_kind,
+                                       "delivered", "trusted protected bundle reconciled")
             index_rows.append({
                 "user": username,
                 "plan": user["plan"],
@@ -977,6 +992,11 @@ def issue(args: argparse.Namespace) -> int:
             if preserved_url:
                 verify_tokens["subscription"] = subscription_token_from_url(preserved_url)
             checks = verify_issued_tokens(endpoint, user_id, verify_tokens, old_tokens)
+            for kind in tokens:
+                record_migration_event(
+                    endpoint, admin_token, user_id, f"{kind}_token", "delivered",
+                    "protected delivery bundle written and verified",
+                )
     if args.consume_old_bundle:
         if not args.old_bundle:
             raise OperatorError("consume_old_requires_old_bundle")
@@ -1104,6 +1124,9 @@ def copy_secret(args: argparse.Namespace) -> int:
 
 def revoke_legacy(args: argparse.Namespace) -> int:
     user_id = validate_user_id(args.user_id)
+    expected_confirmation = f"REVOKE LEGACY {user_id}"
+    if args.confirmation != expected_confirmation:
+        raise OperatorError("legacy_revoke_confirmation_required")
     admin_token = _admin_token(Path(args.secret_path))
     with selected_endpoint(args) as endpoint:
         value = admin_json(
@@ -1111,7 +1134,7 @@ def revoke_legacy(args: argparse.Namespace) -> int:
             admin_token,
             "/api/admin/token-revoke",
             "POST",
-            {"user_id": user_id, "token_kind": "subscription_legacy"},
+            {"user_id": user_id, "token_kind": "subscription_legacy", "confirmation": args.confirmation},
         )
     if value.get("ok") is not True or value.get("user_id") != user_id:
         raise OperatorError("legacy_revoke_response_invalid")
@@ -1186,6 +1209,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicitly revoke a retained legacy Subscription hash after migration acceptance",
     )
     revoke_parser.add_argument("--user-id", required=True)
+    revoke_parser.add_argument(
+        "--confirmation", required=True,
+        help="must exactly equal 'REVOKE LEGACY <USER_ID>'",
+    )
     revoke_parser.add_argument("--secret-path", type=Path, default=DEFAULT_SECRET_PATH)
     add_endpoint_options(revoke_parser)
 

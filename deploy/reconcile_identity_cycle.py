@@ -61,6 +61,44 @@ def validate_payload(payload: dict) -> None:
                 raise ReconciliationError("entitlement_plan_invalid")
             if entitlement.get("allowance_bytes") is not None:
                 raise ReconciliationError("allowance_must_remain_undecided")
+    for admission in payload.get("node_admissions", []):
+        if not isinstance(admission, dict):
+            raise ReconciliationError("node_admission_invalid")
+        if not isinstance(admission.get("node_id"), str) or not admission["node_id"]:
+            raise ReconciliationError("node_admission_node_invalid")
+        if admission.get("pool_id") not in POOL_NAMES:
+            raise ReconciliationError("node_admission_pool_invalid")
+        if admission.get("metering_status", "unknown") not in {"available", "unknown", "unavailable"}:
+            raise ReconciliationError("node_admission_metering_invalid")
+        protocols = admission.get("supported_protocols", ["vless"])
+        if (not isinstance(protocols, (list, tuple, set))
+                or {str(value).strip().lower() for value in protocols if str(value).strip()} != {"vless"}):
+            raise ReconciliationError("node_admission_protocol_invalid")
+    for override in payload.get("access_overrides", []):
+        if not isinstance(override, dict) or not all(
+            isinstance(override.get(key), str) and override[key]
+            for key in ("user_id", "node_id", "decision", "allocation_role", "reason", "source")
+        ):
+            raise ReconciliationError("access_override_invalid")
+        if override["decision"] not in {"allow", "deny"}:
+            raise ReconciliationError("access_override_decision_invalid")
+        if override["allocation_role"] not in {"primary", "available", "backup", "reserved", "deny"}:
+            raise ReconciliationError("access_override_role_invalid")
+        if (override["decision"] == "deny") != (override["allocation_role"] == "deny"):
+            raise ReconciliationError("access_override_role_mismatch")
+    for budget in payload.get("operational_budgets", []):
+        if not isinstance(budget, dict):
+            raise ReconciliationError("operational_budget_invalid")
+        if not isinstance(budget.get("user_id"), str) or not budget["user_id"]:
+            raise ReconciliationError("operational_budget_user_invalid")
+        if budget.get("budget_kind", "policy_only") != "policy_only":
+            raise ReconciliationError("enforceable_budget_not_authorized")
+        if (isinstance(budget.get("allowance_bytes"), bool)
+                or not isinstance(budget.get("allowance_bytes"), int)
+                or budget["allowance_bytes"] < 0):
+            raise ReconciliationError("operational_budget_allowance_invalid")
+        if not budget.get("node_id") and not budget.get("pool_id"):
+            raise ReconciliationError("operational_budget_scope_missing")
     for resource in payload.get("infrastructure_resources", []):
         if not isinstance(resource, dict):
             raise ReconciliationError("resource_invalid")
@@ -114,12 +152,7 @@ def write_private_json(path: Path, value: dict) -> None:
 
 def active_entitlement_matches(cp: ControlPlane, user_id: str, pool_id: str, plan: str) -> bool:
     with cp.connect() as db:
-        row = db.execute(
-            """SELECT plan,allowance_bytes FROM entitlements
-               WHERE user_id=? AND pool_id=? AND status='active'
-               ORDER BY effective_from DESC LIMIT 1""",
-            (user_id, pool_id),
-        ).fetchone()
+        row = cp._entitlement_at(db, user_id, pool_id, utc_now())
     return bool(row and row["plan"] == plan and row["allowance_bytes"] is None)
 
 
@@ -162,6 +195,26 @@ def main() -> int:
             for entitlement in user.get("entitlements", []):
                 if not active_entitlement_matches(cp, user["user_id"], entitlement["pool_id"], entitlement["plan"]):
                     cp.set_entitlement(user["user_id"], entitlement["pool_id"], entitlement["plan"], None)
+        for admission in payload.get("node_admissions", []):
+            cp.admit_node(
+                admission["node_id"], admission["pool_id"], admission.get("qualification", "conditional"),
+                admission.get("source", "product-owner-policy"), admission.get("effective_from"),
+                admission.get("metering_status", "unknown"), admission.get("supported_protocols", ["vless"]),
+                admission.get("detail", ""),
+            )
+        for override in payload.get("access_overrides", []):
+            cp.set_access_override(
+                override["user_id"], override["node_id"], override["decision"],
+                override["allocation_role"], override["reason"], override["source"],
+                override.get("effective_from"), override.get("effective_to"),
+            )
+        for budget in payload.get("operational_budgets", []):
+            cp.set_operational_budget(
+                budget["user_id"], budget["allowance_bytes"], budget.get("node_id"),
+                budget.get("pool_id"), budget.get("provider_cycle_id"), budget.get("budget_kind", "policy_only"),
+                budget["reason"], budget.get("source", "product-owner-policy"),
+                budget.get("effective_from"), budget.get("effective_to"),
+            )
         cycle_result = cp.reconcile_customer_cycles(user_ids)
         write_private_json(args.token_bundle, {
             "generated_at": utc_now(), "users": token_users,
@@ -175,6 +228,9 @@ def main() -> int:
             "users": len(user_ids),
             "resources": len(payload.get("infrastructure_resources", [])),
             "cycles": cycle_result,
+            "node_admissions": len(payload.get("node_admissions", [])),
+            "access_overrides": len(payload.get("access_overrides", [])),
+            "operational_budgets": len(payload.get("operational_budgets", [])),
             "token_bundle": str(args.token_bundle),
         }, separators=(",", ":")))
         return 0

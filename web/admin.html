@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SparkLink OWNER Operations</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #f4f6f8; color: #17202a; }
+    main { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 4px; }
+    .muted { color: #5c6770; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 20px 0; }
+    .card { background: white; border: 1px solid #dfe4e8; border-radius: 10px; padding: 14px; box-shadow: 0 2px 8px #17202a0d; }
+    .value { font-size: 1.45rem; font-weight: 700; margin-top: 5px; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { text-align: left; vertical-align: top; padding: 9px; border-bottom: 1px solid #e8ecef; }
+    th { background: #eef2f5; }
+    button { border: 1px solid #aeb9c2; background: white; border-radius: 6px; padding: 6px 9px; cursor: pointer; margin: 2px; }
+    button:hover { background: #eef5ff; }
+    button.danger { color: #9d1c1c; }
+    #detail { white-space: pre-wrap; overflow: auto; max-height: 560px; font: 12px ui-monospace, monospace; }
+    .status-ok { color: #147a3d; }
+    .status-warn { color: #9a5a00; }
+    .status-bad { color: #a12020; }
+    @media (max-width: 800px) { main { padding: 12px; } table { font-size: 12px; } th, td { padding: 6px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>SparkLink OWNER Operations</h1>
+  <div class="muted">本页只在本机 loopback 提供；不会在浏览器响应中返回 token 或 Subscription URL。复制动作由本机 operator 执行。</div>
+  <div id="message" class="muted" role="status"></div>
+  <section id="summary" class="grid"></section>
+  <section class="card">
+    <h2>Users</h2>
+    <table>
+      <thead><tr><th>User</th><th>Plan / Role</th><th>Subscription</th><th>Usage</th><th>Actions</th></tr></thead>
+      <tbody id="users"></tbody>
+    </table>
+  </section>
+  <section class="card">
+    <h2>User detail</h2>
+    <div id="detail" class="muted">选择一个 User 查看安全 metadata。</div>
+  </section>
+  <section class="card">
+    <h2>Infrastructure / collector</h2>
+    <div id="infra" class="muted"></div>
+  </section>
+</main>
+<script>
+const message = document.getElementById('message');
+function show(text, bad = false) { message.textContent = text; message.className = bad ? 'status-bad' : 'muted'; }
+function bytes(value) {
+  if (value === null || value === undefined) return 'Unknown';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']; let n = Number(value), i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 2 : 0)} ${units[i]}`;
+}
+function esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function api(path, options = {}) {
+  const response = await fetch(path, { cache: 'no-store', ...options, headers: {'Content-Type': 'application/json', ...(options.headers || {})} });
+  const value = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(value.error || `HTTP ${response.status}`);
+  return value;
+}
+function actionButton(label, user, kind, action) {
+  return `<button data-user="${esc(user)}" data-kind="${esc(kind)}" data-action="${action}">${esc(label)}</button>`;
+}
+function render(state) {
+  const overview = state.overview || {};
+  const users = state.users || [];
+  const nodeCount = (overview.nodes || []).length;
+  const attention = (overview.nodes || []).filter(n => ['unknown','stale','unavailable'].includes(n.coverage_status)).length;
+  document.getElementById('summary').innerHTML = [
+    ['Nodes', nodeCount],
+    ['Users', users.length],
+    ['Attention', attention],
+    ['Unresolved records', overview.unresolved_usage_records ?? 0],
+  ].map(item => `<div class="card"><div class="muted">${esc(item[0])}</div><div class="value">${esc(item[1])}</div></div>`).join('');
+  document.getElementById('users').innerHTML = users.map(user => {
+    const usage = user.usage_bytes === null || user.usage_bytes === undefined ? 'Unknown' : bytes(user.usage_bytes);
+    const sub = `${esc(user.subscription_status)} (${esc(user.subscription_entry_count)})`;
+    return `<tr><td><strong>${esc(user.display_name)}</strong><br><span class="muted">${esc(user.user_id)}</span></td>` +
+      `<td>${esc(user.plan)} / ${esc(user.role)}</td><td>${sub}</td><td>${esc(usage)}</td><td>` +
+      `<button data-user="${esc(user.user_id)}" data-action="detail">Detail</button>` +
+      actionButton('Copy Portal', user.user_id, 'portal', 'copy') +
+      actionButton('Copy Subscription URL', user.user_id, 'subscription', 'copy') +
+      `<button class="danger" data-user="${esc(user.user_id)}" data-kind="portal" data-action="rotate">Rotate Portal</button>` +
+      `<button class="danger" data-user="${esc(user.user_id)}" data-kind="subscription" data-action="rotate">Rotate Subscription</button>` +
+      `</td></tr>`;
+  }).join('');
+  const snapshots = overview.provider_resource_snapshots || [];
+  const heartbeats = overview.collector_heartbeats || [];
+  document.getElementById('infra').innerHTML =
+    `<p><strong>Provider snapshots:</strong> ${snapshots.length ? snapshots.map(s => `${esc(s.resource_id)}: ${esc(s.freshness_status)} / remaining ${esc(bytes(s.remaining_bytes))} / reset ${esc(s.next_reset_at || 'Unknown')}`).join('<br>') : 'Unknown / no authoritative snapshot imported'}</p>` +
+    `<p><strong>Collector:</strong> ${heartbeats.length ? heartbeats.map(h => `${esc(h.collector_id)}: ${esc(h.status)} / age ${esc(h.age_seconds ?? 'Unknown')}s`).join('<br>') : 'Unknown / no heartbeat recorded'}</p>`;
+}
+async function load() {
+  try { const state = await api('/api/console/state'); render(state); show(`已刷新 ${new Date().toLocaleString()}`); }
+  catch (error) { show(error.message, true); }
+}
+async function detail(user) {
+  try {
+    const value = await api(`/api/console/users/${encodeURIComponent(user)}`);
+    document.getElementById('detail').textContent = JSON.stringify(value, null, 2);
+  } catch (error) { show(error.message, true); }
+}
+document.addEventListener('click', async event => {
+  const button = event.target.closest('button'); if (!button) return;
+  const user = button.dataset.user, action = button.dataset.action, kind = button.dataset.kind;
+  if (action === 'detail') return detail(user);
+  if (action === 'copy') {
+    try { await api('/api/console/copy', {method: 'POST', body: JSON.stringify({user, kind})}); show(`${user} 的 ${kind} 已复制到本机剪贴板；响应未包含 secret。`); }
+    catch (error) { show(error.message, true); }
+    return;
+  }
+  if (action === 'rotate') {
+    const confirmation = prompt(`Rotate ${kind} for ${user}? 输入：ROTATE ${user} ${kind}`);
+    if (confirmation !== `ROTATE ${user} ${kind}`) return;
+    try { await api('/api/console/rotate', {method: 'POST', body: JSON.stringify({user, kind, confirmation})}); show(`${user} 的 ${kind} 已 rotate，protected bundle 已更新；响应未包含 secret。`); await load(); }
+    catch (error) { show(error.message, true); }
+  }
+});
+load();
+</script>
+</body>
+</html>

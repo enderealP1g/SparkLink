@@ -15,6 +15,7 @@ from src.sparklink_control_plane import (
     CUSTOMER_CYCLE_BASELINE,
     CUSTOMER_CYCLE_POLICY_ID,
     Unauthorized,
+    ServiceUnavailable,
     customer_cycle_window,
     token_hash,
 )
@@ -439,10 +440,49 @@ class ControlPlaneTests(unittest.TestCase):
             db.close()
         self.assertEqual(row[0], token_hash(new_subscription))
         self.assertEqual(row[1], token_hash(old_subscription))
-        self.cp.revoke_legacy_subscription("usr_test")
+        self.cp.record_migration_event(
+            "usr_test", "subscription_token", "current", "confirmed",
+            "test", "replacement verified",
+        )
+        self.cp.revoke_legacy_subscription("usr_test", "REVOKE LEGACY usr_test")
         with self.assertRaises(Unauthorized):
             self.cp._user_by_subscription_token(old_subscription)
         self.assertEqual(self.cp._user_by_subscription_token(new_subscription)["user_id"], "usr_test")
+
+    def test_legacy_revoke_requires_exact_and_current_confirmation(self):
+        self.cp.issue_tokens("usr_test", "subscription", revoke_old=False)
+        with self.assertRaises(Conflict):
+            self.cp.revoke_legacy_subscription("usr_test", "REVOKE LEGACY wrong")
+        self.cp.record_migration_event(
+            "usr_test", "subscription_token", "current", "confirmed",
+            "test", "replacement verified",
+        )
+        self.cp.record_migration_event(
+            "usr_test", "subscription_token", "current", "issued",
+            "test", "new replacement issued after confirmation",
+        )
+        with self.assertRaises(Conflict):
+            self.cp.revoke_legacy_subscription("usr_test", "REVOKE LEGACY usr_test")
+
+    def test_subscription_projection_respects_independent_node_capability(self):
+        self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
+        self.cp.set_node_capability(
+            "hypro02", access_status="allowed", subscription_status="unavailable",
+            metering_status="unknown", quota_status="unavailable", source="test",
+        )
+        with self.assertRaises(ServiceUnavailable):
+            self.cp.subscription(self.user["subscription_token"])
+        detail = self.cp.admin_user_detail("usr_test")
+        self.assertEqual(detail["subscription_status"], "not_configured")
+
+    def test_entitlement_resolution_is_time_effective(self):
+        future = "2099-01-01T00:00:00Z"
+        self.cp.set_entitlement("usr_test", "PREMIUM", "Basic", None, future)
+        with self.cp.connect() as db:
+            current = self.cp._entitlement_at(db, "usr_test", "PREMIUM", "2026-09-02T00:00:00Z")
+            later = self.cp._entitlement_at(db, "usr_test", "PREMIUM", "2099-01-02T00:00:00Z")
+        self.assertEqual(current["plan"], "Plus")
+        self.assertEqual(later["plan"], "Basic")
 
     def test_both_issuance_retains_only_subscription_previous_hash(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
@@ -627,6 +667,106 @@ class ControlPlaneTests(unittest.TestCase):
         hypro02 = next(node for node in overview["nodes"] if node["node_id"] == "hypro02")
         self.assertEqual(hypro02["pool_id"], "PREMIUM")
         self.assertIn("premium_capacity_pressure", overview)
+
+    def test_advanced_access_is_separate_from_metering_and_override_filters_projection(self):
+        self.cp.admit_node(
+            "dedirock", "ADVANCED", metering_status="unknown",
+            source="test-admission", detail="runtime is staged outside this unit test",
+        )
+        self.cp.set_entitlement("usr_test", "ADVANCED", "Plus", None)
+        runtime = "1" * 64
+        credential = self.cp.add_credential("dedirock", runtime, "xray", "vless", "usr_test")
+        self.cp.add_subscription_entry(
+            "usr_test", "dedirock", "ADVANCED", "vless", "vless://advanced",
+            "Basic", credential_id=credential,
+        )
+        self.cp.set_coverage("dedirock", "test", "unknown", "no per-user stats")
+        body = base64.b64decode(self.cp.subscription(self.user["subscription_token"])).decode()
+        self.assertEqual(body, "vless://advanced\n")
+        access = next(item for item in self.cp.effective_access("usr_test") if item["node_id"] == "dedirock")
+        self.assertEqual(access["decision"], "allow")
+        self.assertEqual(access["capability"]["metering_status"], "unknown")
+        self.cp.set_access_override(
+            "usr_test", "dedirock", "deny", "deny", "test deny", "test",
+        )
+        with self.assertRaises(Conflict):
+            self.cp.add_subscription_entry(
+                "usr_test", "dedirock", "ADVANCED", "vless", "vless://denied", "Basic",
+            )
+        with self.assertRaises(ServiceUnavailable):
+            self.cp.subscription(self.user["subscription_token"])
+
+    def test_policy_budget_cannot_become_hard_enforcement_and_migration_is_append_only(self):
+        budget = self.cp.set_operational_budget(
+            "usr_test", 200 * 1024 ** 3, node_id="hypro02", pool_id="PREMIUM",
+            reason="test policy", source="product-owner-policy",
+        )
+        self.assertEqual(budget["budget_kind"], "policy_only")
+        with self.assertRaises(Conflict):
+            self.cp.set_operational_budget(
+                "usr_test", 1, node_id="hypro02", budget_kind="enforceable",
+                reason="not authorized", source="test",
+            )
+        first = self.cp.record_migration_event(
+            "usr_test", "runtime_credential", "cred_test", "issued", "test",
+        )
+        second = self.cp.record_migration_event(
+            "usr_test", "runtime_credential", "cred_test", "confirmed", "test",
+        )
+        self.assertNotEqual(first["event_id"], second["event_id"])
+        detail = self.cp.admin_user_detail("usr_test")
+        self.assertEqual(detail["migration_latest"][0]["state"], "confirmed")
+        self.assertEqual(detail["operational_budgets"][0]["budget_id"], budget["budget_id"])
+
+    def test_provider_cycle_snapshot_and_collector_heartbeat_are_separate_from_customer_usage(self):
+        self.cp.upsert_infrastructure_resource({
+            "resource_id": "dedirock-resource",
+            "provider_name": "DediRock",
+            "provider_instance_id": "dedirock-la-bf",
+            "node_id": "hypro02",
+            "location": "Los Angeles",
+            "network_label": "AS9929",
+            "local_timezone": "America/Los_Angeles",
+            "timezone_source": "test",
+            "resource_cycle_status": "unknown",
+            "resource_cycle_source": "provider evidence pending",
+        })
+        self.cp.record_provider_resource_cycle({
+            "provider_cycle_id": "prc_test",
+            "resource_id": "dedirock-resource",
+            "cycle_key": "2026-09",
+            "starts_at": "2026-09-01T00:00:00Z",
+            "ends_at": "2026-10-01T00:00:00Z",
+            "timezone": "America/Los_Angeles",
+            "status": "unknown",
+            "source": "test evidence",
+        })
+        runtime = "7" * 64
+        self.cp.add_credential("hypro02", runtime, "xray", "vless", "usr_test")
+        self.cp.ingest_observations(
+            "hypro02", "test", "epoch-1",
+            [{"runtime_ref_hash": runtime, "uplink_bytes": 1, "downlink_bytes": 2}],
+            "2026-09-02T00:00:00Z",
+        )
+        db = self.cp.connect()
+        try:
+            provider_cycle_id = db.execute(
+                "SELECT provider_cycle_id FROM usage_ledger WHERE node_id='hypro02'"
+            ).fetchone()[0]
+        finally:
+            db.close()
+        self.assertEqual(provider_cycle_id, "prc_test")
+        self.cp.record_provider_resource_snapshot({
+            "resource_id": "dedirock-resource", "status": "available",
+            "capacity_bytes": 4 * 1024 ** 4, "used_bytes": 1024,
+            "remaining_bytes": 4 * 1024 ** 4 - 1024,
+            "observed_at": "2026-09-02T00:00:00Z", "source": "test provider API",
+            "next_reset_at": "2026-10-01T00:00:00Z",
+        })
+        self.cp.record_collector_heartbeat("test-collector", "completed", 3, 3, 0, "test")
+        overview = self.cp.admin_overview()
+        self.assertEqual(overview["provider_resource_snapshots"][0]["source"], "test provider API")
+        self.assertEqual(overview["collector_heartbeats"][0]["status"], "completed")
 
 
 if __name__ == "__main__":

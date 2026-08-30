@@ -15,3 +15,4 @@ No credentials, UUIDs, subscription tokens, private keys, passwords, or other se
 
 本次 MVP 的 QQG origin、public edge 与 metering operations evidence 记录在 [Production MVP Control Plane Operations Record](operations/2026-08-29_PRODUCTION_MVP_CONTROL_PLANE.md)；hardening evidence 见 [Metering hardening record](operations/2026-08-29_METERING_HARDENING.md)。
 Production identity 与 customer/provider cycle reconciliation 见 [identity and cycle record](operations/2026-08-29_PRODUCTION_IDENTITY_CYCLE_RECONCILIATION.md) 与 [ADR-0006](decisions/0006-production-identity-and-customer-cycle.md)。
+当前 P0→P6 Product / Operations reconciliation 见 [Product Operations reconciliation](operations/2026-08-29_PRODUCT_OPERATIONS_RECONCILIATION.md)。

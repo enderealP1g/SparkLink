@@ -26,7 +26,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "web"
 PLAN_ORDER = {"Free": 0, "Basic": 1, "Plus": 2}
-POOL_NAMES = ("STANDARD", "PREMIUM")
+POOL_NAMES = ("STANDARD", "ADVANCED", "PREMIUM")
+PLAN_POOL_ENTITLEMENTS = {
+    "Free": frozenset(),
+    "Basic": frozenset({"STANDARD", "ADVANCED"}),
+    "Plus": frozenset({"STANDARD", "ADVANCED", "PREMIUM"}),
+}
+ACCESS_DECISIONS = {"allow", "deny"}
+ALLOCATION_ROLES = {"default", "primary", "available", "backup", "reserved", "deny"}
+MIGRATION_STATES = {
+    "issued", "delivered", "fetched", "managed_traffic_observed",
+    "confirmed", "legacy_retirement_ready", "retired",
+}
 DEFAULT_COVERAGE_MAX_AGE_SECONDS = 900
 CUSTOMER_CYCLE_TIMEZONE = "Asia/Shanghai"
 CUSTOMER_CYCLE_POLICY_ID = "customer-monthly-15th-asia-shanghai-v1"
@@ -106,6 +117,24 @@ CREATE TABLE IF NOT EXISTS provider_resource_cycles (
     UNIQUE(resource_id, cycle_key)
 );
 
+CREATE TABLE IF NOT EXISTS provider_resource_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    resource_id TEXT NOT NULL REFERENCES infrastructure_resources(resource_id),
+    capacity_bytes INTEGER,
+    used_bytes INTEGER,
+    remaining_bytes INTEGER,
+    resource_cycle_start TEXT,
+    resource_cycle_end TEXT,
+    next_reset_at TEXT,
+    financial_cycle TEXT,
+    next_due_at TEXT,
+    observed_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('available', 'stale', 'unknown', 'unavailable')),
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS node_pool_memberships (
     node_id TEXT NOT NULL REFERENCES nodes(node_id),
     pool_id TEXT NOT NULL REFERENCES resource_pools(pool_id),
@@ -113,6 +142,18 @@ CREATE TABLE IF NOT EXISTS node_pool_memberships (
     effective_to TEXT,
     status TEXT NOT NULL,
     PRIMARY KEY (node_id, pool_id, effective_from)
+);
+
+CREATE TABLE IF NOT EXISTS node_capabilities (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(node_id),
+    access_status TEXT NOT NULL CHECK(access_status IN ('allowed', 'staged', 'unavailable', 'unknown')),
+    subscription_status TEXT NOT NULL CHECK(subscription_status IN ('allowed', 'staged', 'unavailable', 'unknown')),
+    metering_status TEXT NOT NULL CHECK(metering_status IN ('available', 'unknown', 'unavailable')),
+    quota_status TEXT NOT NULL CHECK(quota_status IN ('policy_only', 'unavailable')),
+    supported_protocols TEXT NOT NULL,
+    source TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    detail TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -125,6 +166,37 @@ CREATE TABLE IF NOT EXISTS users (
     subscription_token_hash TEXT NOT NULL UNIQUE,
     subscription_token_legacy_hash TEXT UNIQUE,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_access_overrides (
+    access_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(user_id),
+    node_id TEXT NOT NULL REFERENCES nodes(node_id),
+    decision TEXT NOT NULL CHECK(decision IN ('allow', 'deny')),
+    allocation_role TEXT NOT NULL CHECK(allocation_role IN ('default', 'primary', 'available', 'backup', 'reserved', 'deny')),
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL,
+    effective_from TEXT NOT NULL,
+    effective_to TEXT,
+    status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'retired')),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS operational_budgets (
+    budget_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(user_id),
+    node_id TEXT REFERENCES nodes(node_id),
+    pool_id TEXT REFERENCES resource_pools(pool_id),
+    provider_cycle_id TEXT REFERENCES provider_resource_cycles(provider_cycle_id),
+    allowance_bytes INTEGER NOT NULL CHECK(allowance_bytes >= 0),
+    budget_kind TEXT NOT NULL CHECK(budget_kind IN ('policy_only', 'enforceable')),
+    status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'retired')),
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL,
+    effective_from TEXT NOT NULL,
+    effective_to TEXT,
+    created_at TEXT NOT NULL,
+    CHECK(node_id IS NOT NULL OR pool_id IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS billing_cycles (
@@ -167,12 +239,36 @@ CREATE TABLE IF NOT EXISTS credentials (
     UNIQUE(node_id, runtime_ref_hash)
 );
 
+CREATE TABLE IF NOT EXISTS credential_migration_events (
+    event_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(user_id),
+    subject_kind TEXT NOT NULL,
+    subject_ref TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('issued', 'delivered', 'fetched', 'managed_traffic_observed', 'confirmed', 'legacy_retirement_ready', 'retired')),
+    observed_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS coverage_events (
     coverage_id TEXT PRIMARY KEY,
     node_id TEXT NOT NULL REFERENCES nodes(node_id),
     source TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('available', 'gap', 'stale', 'unknown')),
     observed_at TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collector_heartbeats (
+    heartbeat_id TEXT PRIMARY KEY,
+    collector_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'degraded', 'failed')),
+    observed_at TEXT NOT NULL,
+    attempted_nodes INTEGER NOT NULL CHECK(attempted_nodes >= 0),
+    ingested_nodes INTEGER NOT NULL CHECK(ingested_nodes >= 0),
+    failed_nodes INTEGER NOT NULL CHECK(failed_nodes >= 0),
+    source TEXT NOT NULL,
     detail TEXT NOT NULL
 );
 
@@ -237,6 +333,16 @@ CREATE INDEX IF NOT EXISTS idx_ledger_user_cycle
     ON usage_ledger(user_id, cycle_id, pool_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_node_pool
     ON usage_ledger(node_id, pool_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_access_override_lookup
+    ON user_access_overrides(user_id, node_id, effective_from, effective_to, status);
+CREATE INDEX IF NOT EXISTS idx_operational_budget_lookup
+    ON operational_budgets(user_id, node_id, pool_id, effective_from, effective_to, status);
+CREATE INDEX IF NOT EXISTS idx_migration_event_lookup
+    ON credential_migration_events(user_id, subject_kind, subject_ref, created_at);
+CREATE INDEX IF NOT EXISTS idx_provider_snapshot_lookup
+    ON provider_resource_snapshots(resource_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_collector_heartbeat_lookup
+    ON collector_heartbeats(collector_id, observed_at);
 """
 
 
@@ -580,6 +686,338 @@ class ControlPlane:
             )
         return provider_cycle_id
 
+    @staticmethod
+    def _validate_capability_values(access_status: str, subscription_status: str,
+                                    metering_status: str, quota_status: str,
+                                    supported_protocols: object) -> list[str]:
+        if access_status not in {"allowed", "staged", "unavailable", "unknown"}:
+            raise ControlPlaneError("invalid node access status")
+        if subscription_status not in {"allowed", "staged", "unavailable", "unknown"}:
+            raise ControlPlaneError("invalid node subscription status")
+        if metering_status not in {"available", "unknown", "unavailable"}:
+            raise ControlPlaneError("invalid node metering status")
+        if quota_status not in {"policy_only", "unavailable"}:
+            raise Conflict("hard quota enforcement is not authorized")
+        if not isinstance(supported_protocols, (list, tuple, set)):
+            raise ControlPlaneError("node protocols must be a list")
+        protocols = sorted({str(value).strip().lower() for value in supported_protocols if str(value).strip()})
+        if not protocols or any(value != "vless" for value in protocols):
+            raise Conflict("only Xray VLESS is currently supported")
+        return protocols
+
+    def set_node_capability(self, node_id: str, access_status: str = "allowed",
+                            subscription_status: str = "allowed",
+                            metering_status: str = "unknown",
+                            quota_status: str = "unavailable",
+                            supported_protocols: object = ("vless",),
+                            source: str = "operator", detail: str = "",
+                            observed_at: str | None = None) -> dict:
+        protocols = self._validate_capability_values(
+            access_status, subscription_status, metering_status, quota_status, supported_protocols
+        )
+        if not str(source).strip():
+            raise ControlPlaneError("node capability source must not be empty")
+        sample_time = normalize_time(observed_at) if observed_at else utc_now()
+        if sample_time is None:
+            raise ControlPlaneError("observed_at must be ISO-8601")
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
+                raise NotFound("node not found")
+            db.execute(
+                """INSERT INTO node_capabilities(
+                       node_id,access_status,subscription_status,metering_status,quota_status,
+                       supported_protocols,source,observed_at,detail
+                   ) VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(node_id) DO UPDATE SET
+                       access_status=excluded.access_status,
+                       subscription_status=excluded.subscription_status,
+                       metering_status=excluded.metering_status,
+                       quota_status=excluded.quota_status,
+                       supported_protocols=excluded.supported_protocols,
+                       source=excluded.source,observed_at=excluded.observed_at,
+                       detail=excluded.detail""",
+                (node_id, access_status, subscription_status, metering_status, quota_status,
+                 json.dumps(protocols, separators=(",", ":")), str(source).strip(), sample_time,
+                 str(detail)[:500]),
+            )
+        return {
+            "node_id": node_id,
+            "access_status": access_status,
+            "subscription_status": subscription_status,
+            "metering_status": metering_status,
+            "quota_status": quota_status,
+            "supported_protocols": protocols,
+            "source": str(source).strip(),
+            "observed_at": sample_time,
+        }
+
+    def admit_node(self, node_id: str, pool_id: str, qualification: str = "conditional",
+                   source: str = "operator", effective_from: str | None = None,
+                   metering_status: str = "unknown",
+                   supported_protocols: object = ("vless",),
+                   detail: str = "") -> dict:
+        """Admit a node to the management-plane model without changing its runtime.
+
+        Runtime configuration changes remain a separate, explicitly staged
+        operation. Admission records that access/subscription are allowed and
+        that metering/quota capabilities are independent dimensions.
+        """
+        if pool_id not in POOL_NAMES:
+            raise ControlPlaneError("invalid pool")
+        when = normalize_time(effective_from) if effective_from else utc_now()
+        if when is None:
+            raise ControlPlaneError("effective_from must be ISO-8601")
+        protocols = self._validate_capability_values(
+            "allowed", "allowed", metering_status, "unavailable", supported_protocols
+        )
+        if not str(source).strip():
+            raise ControlPlaneError("node admission source must not be empty")
+        with self.connect() as db:
+            node = db.execute("SELECT node_id FROM nodes WHERE node_id=?", (node_id,)).fetchone()
+            if node is None:
+                raise NotFound("node not found")
+            db.execute(
+                "UPDATE nodes SET status='active',qualification=? WHERE node_id=?",
+                (qualification, node_id),
+            )
+            db.execute(
+                """UPDATE node_pool_memberships
+                   SET effective_to=?,status='superseded'
+                   WHERE node_id=? AND status='active' AND effective_to IS NULL AND pool_id<>?""",
+                (when, node_id, pool_id),
+            )
+            db.execute(
+                """INSERT INTO node_pool_memberships(node_id,pool_id,effective_from,effective_to,status)
+                   VALUES (?,?,?,NULL,'active')
+                   ON CONFLICT(node_id,pool_id,effective_from) DO UPDATE SET
+                       effective_to=NULL,status='active'""",
+                (node_id, pool_id, when),
+            )
+            db.execute(
+                """INSERT INTO node_capabilities(
+                       node_id,access_status,subscription_status,metering_status,quota_status,
+                       supported_protocols,source,observed_at,detail
+                   ) VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(node_id) DO UPDATE SET
+                       access_status='allowed',subscription_status='allowed',
+                       metering_status=excluded.metering_status,quota_status='unavailable',
+                       supported_protocols=excluded.supported_protocols,source=excluded.source,
+                       observed_at=excluded.observed_at,detail=excluded.detail""",
+                (node_id, "allowed", "allowed", metering_status, "unavailable",
+                 json.dumps(protocols, separators=(",", ":")), str(source).strip(), when,
+                 str(detail)[:500]),
+            )
+        return {
+            "node_id": node_id, "pool_id": pool_id, "status": "active",
+            "qualification": qualification, "access_status": "allowed",
+            "subscription_status": "allowed", "metering_status": metering_status,
+            "quota_status": "unavailable", "supported_protocols": protocols,
+            "effective_from": when, "source": str(source).strip(),
+        }
+
+    def set_access_override(self, user_id: str, node_id: str, decision: str,
+                            allocation_role: str, reason: str, source: str,
+                            effective_from: str | None = None,
+                            effective_to: str | None = None) -> dict:
+        if decision not in ACCESS_DECISIONS:
+            raise ControlPlaneError("invalid access decision")
+        if allocation_role not in ALLOCATION_ROLES:
+            raise ControlPlaneError("invalid allocation role")
+        if (decision == "deny") != (allocation_role == "deny"):
+            raise ControlPlaneError("deny access must use deny allocation role")
+        if decision == "allow" and allocation_role == "deny":
+            raise ControlPlaneError("allow access cannot use deny allocation role")
+        if not str(reason).strip() or not str(source).strip():
+            raise ControlPlaneError("access override reason and source are required")
+        starts = normalize_time(effective_from) if effective_from else utc_now()
+        ends = normalize_time(effective_to) if effective_to else None
+        if starts is None or (effective_to and ends is None):
+            raise ControlPlaneError("access override timestamps must be ISO-8601")
+        if ends and parse_time(ends) <= parse_time(starts):
+            raise ControlPlaneError("access override effective_to must be after effective_from")
+        access_id = f"uxa_{uuid.uuid4().hex}"
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is None:
+                raise NotFound("user not found")
+            if db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
+                raise NotFound("node not found")
+            db.execute(
+                """UPDATE user_access_overrides SET effective_to=?,status='superseded'
+                   WHERE user_id=? AND node_id=? AND status='active' AND effective_to IS NULL
+                     AND effective_from < ?""",
+                (starts, user_id, node_id, starts),
+            )
+            db.execute(
+                """INSERT INTO user_access_overrides(
+                       access_id,user_id,node_id,decision,allocation_role,reason,source,
+                       effective_from,effective_to,status,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,'active',?)""",
+                (access_id, user_id, node_id, decision, allocation_role, str(reason)[:500],
+                 str(source)[:200], starts, ends, utc_now()),
+            )
+        return {
+            "access_id": access_id, "user_id": user_id, "node_id": node_id,
+            "decision": decision, "allocation_role": allocation_role,
+            "reason": str(reason)[:500], "source": str(source)[:200],
+            "effective_from": starts, "effective_to": ends, "status": "active",
+        }
+
+    def set_operational_budget(self, user_id: str, allowance_bytes: int,
+                               node_id: str | None = None, pool_id: str | None = None,
+                               provider_cycle_id: str | None = None,
+                               budget_kind: str = "policy_only",
+                               reason: str = "", source: str = "operator",
+                               effective_from: str | None = None,
+                               effective_to: str | None = None) -> dict:
+        if isinstance(allowance_bytes, bool) or not isinstance(allowance_bytes, int) or allowance_bytes < 0:
+            raise ControlPlaneError("allowance_bytes must be a non-negative integer")
+        if budget_kind != "policy_only":
+            raise Conflict("hard quota enforcement is not authorized")
+        if not node_id and not pool_id:
+            raise ControlPlaneError("operational budget needs a node or pool scope")
+        if pool_id and pool_id not in POOL_NAMES:
+            raise ControlPlaneError("invalid pool")
+        if not str(reason).strip() or not str(source).strip():
+            raise ControlPlaneError("budget reason and source are required")
+        starts = normalize_time(effective_from) if effective_from else utc_now()
+        ends = normalize_time(effective_to) if effective_to else None
+        if starts is None or (effective_to and ends is None):
+            raise ControlPlaneError("budget timestamps must be ISO-8601")
+        if ends and parse_time(ends) <= parse_time(starts):
+            raise ControlPlaneError("budget effective_to must be after effective_from")
+        budget_id = f"bud_{uuid.uuid4().hex}"
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is None:
+                raise NotFound("user not found")
+            if node_id and db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone() is None:
+                raise NotFound("node not found")
+            if provider_cycle_id and db.execute(
+                "SELECT 1 FROM provider_resource_cycles WHERE provider_cycle_id=?", (provider_cycle_id,)
+            ).fetchone() is None:
+                raise NotFound("provider resource cycle not found")
+            db.execute(
+                """UPDATE operational_budgets SET effective_to=?,status='superseded'
+                   WHERE user_id=? AND COALESCE(node_id,'')=COALESCE(?, '')
+                     AND COALESCE(pool_id,'')=COALESCE(?, '') AND status='active'
+                     AND effective_to IS NULL AND effective_from < ?""",
+                (starts, user_id, node_id, pool_id, starts),
+            )
+            db.execute(
+                """INSERT INTO operational_budgets(
+                       budget_id,user_id,node_id,pool_id,provider_cycle_id,allowance_bytes,
+                       budget_kind,status,reason,source,effective_from,effective_to,created_at
+                   ) VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?)""",
+                (budget_id, user_id, node_id, pool_id, provider_cycle_id, allowance_bytes,
+                 budget_kind, str(reason)[:500], str(source)[:200], starts, ends, utc_now()),
+            )
+        return {
+            "budget_id": budget_id, "user_id": user_id, "node_id": node_id,
+            "pool_id": pool_id, "provider_cycle_id": provider_cycle_id,
+            "allowance_bytes": allowance_bytes, "budget_kind": budget_kind,
+            "status": "active", "reason": str(reason)[:500],
+            "source": str(source)[:200], "effective_from": starts, "effective_to": ends,
+        }
+
+    def record_migration_event(self, user_id: str, subject_kind: str,
+                               subject_ref: str, state: str, source: str,
+                               detail: str = "", observed_at: str | None = None) -> dict:
+        if state not in MIGRATION_STATES:
+            raise ControlPlaneError("invalid migration state")
+        if not str(subject_kind).strip() or not str(subject_ref).strip() or not str(source).strip():
+            raise ControlPlaneError("migration event fields are required")
+        sample_time = normalize_time(observed_at) if observed_at else utc_now()
+        if sample_time is None:
+            raise ControlPlaneError("observed_at must be ISO-8601")
+        event_id = f"mig_{uuid.uuid4().hex}"
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is None:
+                raise NotFound("user not found")
+            db.execute(
+                """INSERT INTO credential_migration_events(
+                       event_id,user_id,subject_kind,subject_ref,state,observed_at,source,detail,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (event_id, user_id, str(subject_kind)[:80], str(subject_ref)[:200], state,
+                 sample_time, str(source)[:200], str(detail)[:500], utc_now()),
+            )
+        return {"event_id": event_id, "user_id": user_id, "subject_kind": str(subject_kind)[:80],
+                "subject_ref": str(subject_ref)[:200], "state": state,
+                "observed_at": sample_time, "source": str(source)[:200]}
+
+    def record_collector_heartbeat(self, collector_id: str, status: str,
+                                   attempted_nodes: int, ingested_nodes: int,
+                                   failed_nodes: int, source: str = "collector",
+                                   detail: str = "", observed_at: str | None = None) -> dict:
+        if status not in {"running", "completed", "degraded", "failed"}:
+            raise ControlPlaneError("invalid collector heartbeat status")
+        values = (attempted_nodes, ingested_nodes, failed_nodes)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+            raise ControlPlaneError("collector heartbeat counts are invalid")
+        if ingested_nodes > attempted_nodes or failed_nodes > attempted_nodes:
+            raise ControlPlaneError("collector heartbeat counts are inconsistent")
+        if not str(collector_id).strip() or not str(source).strip():
+            raise ControlPlaneError("collector heartbeat source is required")
+        sample_time = normalize_time(observed_at) if observed_at else utc_now()
+        if sample_time is None:
+            raise ControlPlaneError("observed_at must be ISO-8601")
+        heartbeat_id = f"hb_{uuid.uuid4().hex}"
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO collector_heartbeats(
+                       heartbeat_id,collector_id,status,observed_at,attempted_nodes,
+                       ingested_nodes,failed_nodes,source,detail
+                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (heartbeat_id, str(collector_id)[:120], status, sample_time,
+                 attempted_nodes, ingested_nodes, failed_nodes, str(source)[:200], str(detail)[:500]),
+            )
+        return {"heartbeat_id": heartbeat_id, "collector_id": str(collector_id)[:120],
+                "status": status, "observed_at": sample_time,
+                "attempted_nodes": attempted_nodes, "ingested_nodes": ingested_nodes,
+                "failed_nodes": failed_nodes}
+
+    def record_provider_resource_snapshot(self, snapshot: dict) -> str:
+        required = {"resource_id", "observed_at", "source", "status"}
+        if not required.issubset(snapshot):
+            raise ControlPlaneError("provider snapshot fields are incomplete")
+        status = str(snapshot["status"])
+        if status not in {"available", "stale", "unknown", "unavailable"}:
+            raise ControlPlaneError("invalid provider snapshot status")
+        observed_at = normalize_time(str(snapshot["observed_at"]))
+        if observed_at is None or not str(snapshot["source"]).strip():
+            raise ControlPlaneError("provider snapshot source/time is invalid")
+        numeric_fields = ("capacity_bytes", "used_bytes", "remaining_bytes")
+        numeric: dict[str, int | None] = {}
+        for field in numeric_fields:
+            value = snapshot.get(field)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ControlPlaneError("provider snapshot byte fields are invalid")
+            numeric[field] = value
+        times: dict[str, str | None] = {}
+        for field in ("resource_cycle_start", "resource_cycle_end", "next_reset_at", "next_due_at"):
+            value = snapshot.get(field)
+            normalized = normalize_time(str(value)) if value else None
+            if value and normalized is None:
+                raise ControlPlaneError("provider snapshot timestamp is invalid")
+            times[field] = normalized
+        snapshot_id = str(snapshot.get("snapshot_id") or f"ps_{uuid.uuid4().hex}")
+        with self.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM infrastructure_resources WHERE resource_id=?", (snapshot["resource_id"],)
+            ).fetchone() is None:
+                raise NotFound("infrastructure resource not found")
+            db.execute(
+                """INSERT INTO provider_resource_snapshots(
+                       snapshot_id,resource_id,capacity_bytes,used_bytes,remaining_bytes,
+                       resource_cycle_start,resource_cycle_end,next_reset_at,financial_cycle,
+                       next_due_at,observed_at,source,status,detail,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (snapshot_id, str(snapshot["resource_id"]), numeric["capacity_bytes"], numeric["used_bytes"],
+                 numeric["remaining_bytes"], times["resource_cycle_start"], times["resource_cycle_end"],
+                 times["next_reset_at"], snapshot.get("financial_cycle"), times["next_due_at"],
+                 observed_at, str(snapshot["source"])[:200], status, str(snapshot.get("detail", ""))[:500],
+                 utc_now()),
+            )
+        return snapshot_id
+
     def _require_admin(self, supplied: str | None) -> None:
         if not self.admin_token or not supplied or not secrets.compare_digest(supplied, self.admin_token):
             raise Unauthorized("admin authentication required")
@@ -718,6 +1156,14 @@ class ControlPlane:
                 f"UPDATE users SET {', '.join(assignments)} WHERE user_id=?",
                 (*parameters, user_id),
             )
+            for kind in issued:
+                db.execute(
+                    """INSERT INTO credential_migration_events(
+                           event_id,user_id,subject_kind,subject_ref,state,observed_at,source,detail,created_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (f"mig_{uuid.uuid4().hex}", user_id, f"{kind}_token", "current", "issued",
+                     utc_now(), "admin-token-issuance", "hash-only Control Plane issuance", utc_now()),
+                )
         retained_kinds = ["subscription"] if retaining_subscription else []
         revoked_kinds = [kind for kind in kinds if kind not in retained_kinds]
         return {
@@ -734,8 +1180,10 @@ class ControlPlane:
             "tokens": issued,
         }
 
-    def revoke_legacy_subscription(self, user_id: str) -> dict:
+    def revoke_legacy_subscription(self, user_id: str, confirmation: str | None = None) -> dict:
         """Explicitly revoke the one retained legacy Subscription hash."""
+        if confirmation != f"REVOKE LEGACY {user_id}":
+            raise Conflict("legacy revocation confirmation required")
         with self.connect() as db:
             user = db.execute(
                 "SELECT user_id,subscription_token_legacy_hash FROM users WHERE user_id=?",
@@ -745,50 +1193,203 @@ class ControlPlane:
                 raise NotFound("user not found")
             if not user["subscription_token_legacy_hash"]:
                 raise Conflict("no retained legacy Subscription hash")
+            latest_migration = db.execute(
+                """SELECT state FROM credential_migration_events
+                   WHERE user_id=? AND subject_kind='subscription_token'
+                     AND subject_ref='current'
+                   ORDER BY created_at DESC,rowid DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+            if latest_migration is None or latest_migration["state"] != "confirmed":
+                raise Conflict("legacy revocation requires confirmed migration")
             db.execute(
                 "UPDATE users SET subscription_token_legacy_hash=NULL WHERE user_id=?",
                 (user_id,),
             )
+            db.execute(
+                """INSERT INTO credential_migration_events(
+                       event_id,user_id,subject_kind,subject_ref,state,observed_at,source,detail,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (f"mig_{uuid.uuid4().hex}", user_id, "legacy_subscription", "current", "retired",
+                 utc_now(), "admin-legacy-revoke", "retained legacy hash revoked", utc_now()),
+            )
         return {"ok": True, "user_id": user_id, "revoked": "subscription_legacy"}
+
+    def admin_user_detail(self, user_id: str) -> dict:
+        """Return a non-secret OWNER view for one User."""
+        now = utc_now()
+        with self.connect() as db:
+            user = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if user is None:
+                raise NotFound("user not found")
+            access_rows = [
+                self._access_at(db, user, row[0], now)
+                for row in db.execute("SELECT node_id FROM nodes ORDER BY node_id").fetchall()
+            ]
+            cycle = self._current_cycle(db, user_id)
+            cycle_view = {
+                "cycle_id": cycle["cycle_id"], "cycle_key": cycle["cycle_key"],
+                "starts_at": cycle["starts_at"], "ends_at": cycle["ends_at"],
+                "cycle_kind": cycle["cycle_kind"], "timezone": cycle["timezone"],
+                "policy_id": cycle["policy_id"], "commercial_applies": bool(cycle["commercial_applies"]),
+                "baseline_at": cycle["baseline_at"],
+            } if cycle else None
+            entitlements = [dict(row) for row in db.execute(
+                """SELECT entitlement_id,pool_id,plan,allowance_bytes,effective_from,effective_to,status
+                   FROM entitlements WHERE user_id=? ORDER BY effective_from,pool_id""",
+                (user_id,),
+            )]
+            credential_rows = db.execute(
+                """SELECT credential_id,node_id,runtime_family,protocol,credential_kind,status,created_at
+                   FROM credentials WHERE user_id=? ORDER BY node_id,credential_id""",
+                (user_id,),
+            ).fetchall()
+            credentials = [dict(row) for row in credential_rows]
+            access_by_node = {item["node_id"]: item for item in access_rows}
+            usage_by_node = []
+            usage_by_pool: dict[str, int | None] = {}
+            for credential_node in sorted({row["node_id"] for row in credential_rows}):
+                access = access_by_node.get(credential_node)
+                pool_id = access["pool_id"] if access else self._pool_at(db, credential_node, now)
+                coverage = self._latest_coverage_record(db, credential_node)
+                coverage_status = self._coverage_status(coverage) or "unknown"
+                hashes = [row[0] for row in db.execute(
+                    """SELECT runtime_ref_hash FROM credentials
+                       WHERE user_id=? AND node_id=? AND status='active'""",
+                    (user_id, credential_node),
+                )]
+                missing = 0
+                unresolved = 0
+                if cycle and hashes:
+                    placeholders = ",".join("?" for _ in hashes)
+                    where = ["o.node_id=?", f"o.runtime_ref_hash IN ({placeholders})"]
+                    params: list[object] = [credential_node, *hashes]
+                    if cycle["starts_at"] is not None:
+                        where.append("o.observed_at >= ?")
+                        params.append(cycle["starts_at"])
+                    if cycle["ends_at"] is not None:
+                        where.append("o.observed_at < ?")
+                        params.append(cycle["ends_at"])
+                    observed = db.execute(
+                        f"SELECT COUNT(DISTINCT o.runtime_ref_hash) FROM usage_observations o WHERE {' AND '.join(where)}",
+                        params,
+                    ).fetchone()[0]
+                    missing = max(0, len(hashes) - int(observed))
+                    unresolved = int(db.execute(
+                        f"""SELECT COUNT(*) FROM usage_ledger l JOIN usage_observations o
+                            ON o.observation_id=l.observation_id
+                            WHERE l.user_id=? AND l.node_id=? AND l.cycle_id=?
+                              AND l.attribution_status!='attributed'
+                              AND o.runtime_ref_hash IN ({placeholders})""",
+                        (user_id, credential_node, cycle["cycle_id"], *hashes),
+                    ).fetchone()[0])
+                known = bool(cycle and coverage_status == "available" and missing == 0 and unresolved == 0)
+                used = None
+                if known:
+                    used = int(db.execute(
+                        """SELECT COALESCE(SUM(delta_uplink_bytes+delta_downlink_bytes),0)
+                           FROM usage_ledger WHERE user_id=? AND node_id=? AND cycle_id=?
+                             AND attribution_status='attributed'""",
+                        (user_id, credential_node, cycle["cycle_id"]),
+                    ).fetchone()[0])
+                usage_by_node.append({
+                    "node_id": credential_node,
+                    "node_name": access["node_name"] if access else credential_node,
+                    "pool_id": pool_id,
+                    "allocation_role": access["allocation_role"] if access else "deny",
+                    "access_decision": access["decision"] if access else "deny",
+                    "coverage_status": coverage_status,
+                    "coverage_observed_at": coverage["observed_at"] if coverage else None,
+                    "coverage_age_seconds": self._coverage_age_seconds(coverage),
+                    "used_bytes": used,
+                    "unresolved_observations": unresolved,
+                    "missing_counters": missing,
+                })
+                if pool_id:
+                    current = usage_by_pool.get(pool_id)
+                    usage_by_pool[pool_id] = used if current is None and pool_id not in usage_by_pool else (
+                        None if current is None or used is None else current + used
+                    )
+            entries = [dict(row) for row in db.execute(
+                """SELECT entry_id,node_id,pool_id,credential_id,protocol,minimum_plan,
+                          projection_status,enabled,created_at
+                   FROM subscription_entries WHERE user_id=? ORDER BY entry_id""",
+                (user_id,),
+            )]
+            projected_entries = [
+                row for row in entries
+                if row["enabled"] and row["projection_status"] == "current"
+                and row["protocol"].lower() != "anytls"
+                and (row["node_id"] is None or self._subscription_access_allowed(
+                    access_by_node.get(row["node_id"]), row["protocol"]
+                ))
+            ]
+            budgets = [dict(row) for row in db.execute(
+                """SELECT budget_id,node_id,pool_id,provider_cycle_id,allowance_bytes,budget_kind,
+                          status,reason,source,effective_from,effective_to
+                   FROM operational_budgets WHERE user_id=? ORDER BY effective_from,budget_id""",
+                (user_id,),
+            )]
+            migration = [dict(row) for row in db.execute(
+                """SELECT subject_kind,subject_ref,state,observed_at,source,detail
+                   FROM credential_migration_events WHERE user_id=?
+                   ORDER BY created_at DESC,rowid DESC""",
+                (user_id,),
+            )]
+            latest_migration = {}
+            for event in migration:
+                latest_migration.setdefault(
+                    (event["subject_kind"], event["subject_ref"]), event
+                )
+        return {
+            "user_id": user["user_id"], "display_name": user["display_name"],
+            "plan": user["plan"], "role": user["role"], "status": user["status"],
+            "token_status": {"portal": "hash_only", "subscription": "hash_only"},
+            "customer_billing_cycle": cycle_view,
+            "default_entitled_pools": sorted(PLAN_POOL_ENTITLEMENTS.get(user["plan"], frozenset())),
+            "entitlements": entitlements,
+            "effective_access": access_rows,
+            "credentials": credentials,
+            "usage_by_node": usage_by_node,
+            "usage_by_pool_bytes": usage_by_pool,
+            "usage_bytes": sum(value for value in usage_by_pool.values() if value is not None)
+                if all(value is not None for value in usage_by_pool.values()) else None,
+            "subscription_status": "available" if projected_entries else "not_configured",
+            "subscription_entry_count": len(projected_entries),
+            "subscription_pool_ids": sorted({row["pool_id"] for row in projected_entries if row["pool_id"]}),
+            "subscription_protocols": sorted({row["protocol"].lower() for row in projected_entries}),
+            "subscription_anytls_count": sum(1 for row in entries if row["protocol"].lower() == "anytls"),
+            "subscription_legacy_retained": bool(user["subscription_token_legacy_hash"]),
+            "subscription_entries": entries,
+            "operational_budgets": budgets,
+            "migration_events": migration,
+            "migration_latest": list(latest_migration.values()),
+        }
 
     def admin_users(self) -> list[dict]:
         """Return non-secret user metadata for the Admin operator."""
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT user_id,display_name,plan,role,status,
-                          subscription_token_legacy_hash
-                   FROM users ORDER BY user_id"""
-            ).fetchall()
-            result = []
-            for row in rows:
-                entries = db.execute(
-                    """SELECT pool_id,protocol FROM subscription_entries
-                       WHERE user_id=? AND enabled=1 AND projection_status='current'
-                       ORDER BY entry_id""",
-                    (row["user_id"],),
-                ).fetchall()
-                projected = [entry for entry in entries if entry["protocol"].lower() != "anytls"]
-                pool_ids = []
-                for pool_id in POOL_NAMES:
-                    if any(entry["pool_id"] == pool_id for entry in projected):
-                        pool_ids.append(pool_id)
-                pool_ids.extend(sorted({entry["pool_id"] for entry in projected if entry["pool_id"] not in pool_ids}))
-                result.append({
-                    "user_id": row["user_id"],
-                    "display_name": row["display_name"],
-                    "plan": row["plan"],
-                    "role": row["role"],
-                    "status": row["status"],
-                    "subscription_status": "available" if projected else "not_configured",
-                    "subscription_entry_count": len(projected),
-                    "subscription_pool_ids": pool_ids,
-                    "subscription_protocols": sorted({entry["protocol"].lower() for entry in projected}),
-                    "subscription_anytls_count": sum(
-                        1 for entry in entries if entry["protocol"].lower() == "anytls"
-                    ),
-                    "subscription_legacy_retained": bool(row["subscription_token_legacy_hash"]),
-                })
-        return result
+            user_ids = [row[0] for row in db.execute(
+                "SELECT user_id FROM users ORDER BY user_id"
+            ).fetchall()]
+        details = [self.admin_user_detail(user_id) for user_id in user_ids]
+        return [
+            {
+                "user_id": detail["user_id"],
+                "display_name": detail["display_name"],
+                "plan": detail["plan"],
+                "role": detail["role"],
+                "status": detail["status"],
+                "subscription_status": detail["subscription_status"],
+                "subscription_entry_count": detail["subscription_entry_count"],
+                "subscription_pool_ids": detail["subscription_pool_ids"],
+                "subscription_protocols": detail["subscription_protocols"],
+                "subscription_anytls_count": detail["subscription_anytls_count"],
+                "subscription_legacy_retained": detail["subscription_legacy_retained"],
+                "migration_latest": detail["migration_latest"],
+            }
+            for detail in details
+        ]
 
     def create_cycle(self, user_id: str, cycle_key: str, starts_at: str | None, ends_at: str | None,
                      cycle_kind: str = "manual", cycle_timezone: str = CUSTOMER_CYCLE_TIMEZONE,
@@ -921,10 +1522,30 @@ class ControlPlane:
                     created += 1
         return {"users": len(user_ids), "legacy_marked": legacy, "scheduled_created": created}
 
+    @staticmethod
+    def _entitlement_at(db: sqlite3.Connection, user_id: str, pool_id: str,
+                        observed_at: str) -> sqlite3.Row | None:
+        return db.execute(
+            """SELECT entitlement_id,plan,allowance_bytes,effective_from,effective_to,status
+               FROM entitlements
+               WHERE user_id=? AND pool_id=? AND status IN ('active','superseded')
+                 AND effective_from <= ? AND (effective_to IS NULL OR effective_to > ?)
+               ORDER BY effective_from DESC,entitlement_id DESC LIMIT 1""",
+            (user_id, pool_id, observed_at, observed_at),
+        ).fetchone()
+
     def set_entitlement(self, user_id: str, pool_id: str, plan: str,
                         allowance_bytes: int | None, effective_from: str | None = None) -> str:
         if pool_id not in POOL_NAMES or plan not in PLAN_ORDER:
             raise ControlPlaneError("invalid pool or plan")
+        if (allowance_bytes is not None
+                and (isinstance(allowance_bytes, bool)
+                     or not isinstance(allowance_bytes, int)
+                     or allowance_bytes < 0)):
+            raise ControlPlaneError("allowance_bytes must be null or a non-negative integer")
+        starts = normalize_time(effective_from) if effective_from else utc_now()
+        if starts is None:
+            raise ControlPlaneError("effective_from must be ISO-8601")
         entitlement_id = f"ent_{uuid.uuid4().hex}"
         with self.connect() as db:
             if db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is None:
@@ -932,14 +1553,16 @@ class ControlPlane:
             if db.execute("SELECT 1 FROM resource_pools WHERE pool_id=?", (pool_id,)).fetchone() is None:
                 raise NotFound("pool not found")
             db.execute(
-                "UPDATE entitlements SET effective_to=?, status='superseded' WHERE user_id=? AND pool_id=? AND status='active'",
-                (effective_from or utc_now(), user_id, pool_id),
+                """UPDATE entitlements SET effective_to=?, status='superseded'
+                   WHERE user_id=? AND pool_id=? AND status='active'
+                     AND effective_from < ? AND (effective_to IS NULL OR effective_to > ?)""",
+                (starts, user_id, pool_id, starts, starts),
             )
             db.execute(
                 """INSERT INTO entitlements
                    (entitlement_id,user_id,pool_id,plan,allowance_bytes,effective_from,effective_to,status)
                    VALUES (?,?,?,?,?,?,NULL,'active')""",
-                (entitlement_id, user_id, pool_id, plan, allowance_bytes, effective_from or utc_now()),
+                (entitlement_id, user_id, pool_id, plan, allowance_bytes, starts),
             )
         return entitlement_id
 
@@ -963,6 +1586,14 @@ class ControlPlane:
                 (credential_id, node_id, user_id, runtime_ref_hash.lower(), runtime_family, protocol,
                  credential_kind, "active", utc_now()),
             )
+            if user_id:
+                db.execute(
+                    """INSERT INTO credential_migration_events(
+                           event_id,user_id,subject_kind,subject_ref,state,observed_at,source,detail,created_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (f"mig_{uuid.uuid4().hex}", user_id, "runtime_credential", credential_id, "issued",
+                     utc_now(), "credential-provisioning", f"{credential_kind} credential registered", utc_now()),
+                )
         return credential_id
 
     def map_credential(self, credential_id: str, user_id: str) -> None:
@@ -993,10 +1624,104 @@ class ControlPlane:
         row = db.execute(
             """SELECT pool_id FROM node_pool_memberships
                WHERE node_id=? AND effective_from <= ? AND (effective_to IS NULL OR effective_to > ?)
-                 AND status='active' ORDER BY effective_from DESC LIMIT 1""",
+                 AND status IN ('active','superseded') ORDER BY effective_from DESC LIMIT 1""",
             (node_id, observed_at, observed_at),
         ).fetchone()
         return row[0] if row else None
+
+    def _access_at(self, db: sqlite3.Connection, user: sqlite3.Row,
+                   node_id: str, observed_at: str) -> dict:
+        node = db.execute(
+            "SELECT node_id,display_name,status,qualification FROM nodes WHERE node_id=?",
+            (node_id,),
+        ).fetchone()
+        if node is None:
+            raise NotFound("node not found")
+        pool_id = self._pool_at(db, node_id, observed_at)
+        capability = db.execute(
+            """SELECT access_status,subscription_status,metering_status,quota_status,
+                      supported_protocols,source,observed_at,detail
+               FROM node_capabilities WHERE node_id=?""",
+            (node_id,),
+        ).fetchone()
+        override = db.execute(
+            """SELECT decision,allocation_role,reason,source,effective_from,effective_to
+               FROM user_access_overrides
+               WHERE user_id=? AND node_id=? AND status IN ('active','superseded')
+                 AND effective_from <= ? AND (effective_to IS NULL OR effective_to > ?)
+               ORDER BY effective_from DESC LIMIT 1""",
+            (user["user_id"], node_id, observed_at, observed_at),
+        ).fetchone()
+        plan_allowed = pool_id in PLAN_POOL_ENTITLEMENTS.get(user["plan"], frozenset())
+        node_available = node["status"] == "active"
+        capability_access = capability is None or capability["access_status"] == "allowed"
+        if override is not None:
+            decision = override["decision"]
+            allocation_role = override["allocation_role"]
+            reason = override["reason"]
+            source = override["source"]
+            decision_source = "user_override"
+            # A User override can grant/restrict product access, but cannot
+            # make an inactive or explicitly unavailable Node operational.
+            if decision == "allow" and (not node_available or not capability_access):
+                decision = "deny"
+                allocation_role = "deny"
+                reason = "node_not_operational"
+        else:
+            decision = "allow" if plan_allowed and node_available and capability_access else "deny"
+            allocation_role = "default" if decision == "allow" else "deny"
+            if not node_available:
+                reason = "node_not_active"
+            elif not capability_access:
+                reason = "node_access_not_allowed"
+            elif not plan_allowed:
+                reason = "plan_default_not_entitled"
+            else:
+                reason = "plan_default"
+            source = "plan_default"
+            decision_source = "plan_default"
+        protocols = []
+        if capability is not None:
+            try:
+                parsed_protocols = json.loads(capability["supported_protocols"])
+                if isinstance(parsed_protocols, list):
+                    protocols = [str(value) for value in parsed_protocols]
+            except (TypeError, json.JSONDecodeError):
+                protocols = []
+        return {
+            "node_id": node["node_id"],
+            "node_name": node["display_name"],
+            "node_status": node["status"],
+            "qualification": node["qualification"],
+            "pool_id": pool_id,
+            "decision": decision,
+            "allocation_role": allocation_role,
+            "reason": reason,
+            "source": source,
+            "decision_source": decision_source,
+            "plan_default_allowed": plan_allowed,
+            "capability": {
+                "access_status": capability["access_status"] if capability else "allowed",
+                "subscription_status": capability["subscription_status"] if capability else "allowed",
+                "metering_status": capability["metering_status"] if capability else "unknown",
+                "quota_status": capability["quota_status"] if capability else "unavailable",
+                "supported_protocols": protocols or ["vless"],
+                "source": capability["source"] if capability else "node_seed",
+                "observed_at": capability["observed_at"] if capability else None,
+                "detail": capability["detail"] if capability else "",
+            },
+        }
+
+    def effective_access(self, user_id: str, observed_at: str | None = None) -> list[dict]:
+        sample_time = normalize_time(observed_at) if observed_at else utc_now()
+        if sample_time is None:
+            raise ControlPlaneError("observed_at must be ISO-8601")
+        with self.connect() as db:
+            user = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if user is None:
+                raise NotFound("user not found")
+            return [self._access_at(db, user, row[0], sample_time)
+                    for row in db.execute("SELECT node_id FROM nodes ORDER BY node_id").fetchall()]
 
     def _cycle_for(self, db: sqlite3.Connection, user_id: str, observed_at: str) -> str | None:
         normalized = normalize_time(observed_at)
@@ -1012,6 +1737,20 @@ class ControlPlane:
                  AND (ends_at IS NULL OR ends_at > ?)
                ORDER BY created_at DESC LIMIT 1""",
             (user_id, normalized, normalized),
+        ).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _provider_cycle_for(db: sqlite3.Connection, node_id: str, observed_at: str) -> str | None:
+        row = db.execute(
+            """SELECT c.provider_cycle_id
+               FROM provider_resource_cycles c
+               JOIN infrastructure_resources r ON r.resource_id=c.resource_id
+               WHERE r.node_id=?
+                 AND c.starts_at IS NOT NULL AND c.starts_at <= ?
+                 AND (c.ends_at IS NULL OR c.ends_at > ?)
+               ORDER BY c.starts_at DESC LIMIT 1""",
+            (node_id, observed_at, observed_at),
         ).fetchone()
         return row[0] if row else None
 
@@ -1140,6 +1879,7 @@ class ControlPlane:
                 user_id = cred[1] if cred else None
                 pool_id = self._pool_at(db, node_id, item_time)
                 cycle_id = self._cycle_for(db, user_id, item_time) if user_id else None
+                provider_cycle_id = self._provider_cycle_for(db, node_id, item_time)
                 status = "attributed" if user_id and pool_id and cycle_id else "unresolved"
                 if status == "unresolved":
                     unresolved += 1
@@ -1150,10 +1890,10 @@ class ControlPlane:
                 db.execute(
                     """INSERT INTO usage_ledger
                        (ledger_id,observation_id,user_id,node_id,pool_id,cycle_id,observed_at,
-                        delta_uplink_bytes,delta_downlink_bytes,attribution_status,detail)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        provider_cycle_id,delta_uplink_bytes,delta_downlink_bytes,attribution_status,detail)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (f"led_{uuid.uuid4().hex}", oid, user_id, node_id, pool_id, cycle_id,
-                     item_time, delta_up, delta_down, status, detail),
+                     item_time, provider_cycle_id, delta_up, delta_down, status, detail),
                 )
             db.execute(
                 "INSERT INTO coverage_events(coverage_id,node_id,source,status,observed_at,detail) VALUES (?,?,?,?,?,?)",
@@ -1193,10 +1933,23 @@ class ControlPlane:
             return None
         return max(0, int((datetime.now(timezone.utc) - observed).total_seconds()))
 
-    def _active_pool_nodes(self, db: sqlite3.Connection, pool_id: str) -> list[str]:
+    @staticmethod
+    def _subscription_access_allowed(access: dict | None, protocol: str) -> bool:
+        if access is None or access.get("decision") != "allow":
+            return False
+        capability = access.get("capability") or {}
+        return (
+            capability.get("subscription_status") == "allowed"
+            and protocol.lower() in {str(value).lower() for value in capability.get("supported_protocols", [])}
+        )
+
+    def _active_pool_nodes(self, db: sqlite3.Connection, pool_id: str,
+                           observed_at: str | None = None) -> list[str]:
+        when = observed_at or utc_now()
         rows = db.execute(
             """SELECT node_id FROM node_pool_memberships
-               WHERE pool_id=? AND status='active' AND effective_to IS NULL""", (pool_id,)
+               WHERE pool_id=? AND status IN ('active','superseded') AND effective_from <= ?
+                 AND (effective_to IS NULL OR effective_to > ?)""", (pool_id, when, when)
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -1207,6 +1960,7 @@ class ControlPlane:
     def user_view(self, token: str) -> dict:
         user = self._user_by_token(token)
         with self.connect() as db:
+            now = utc_now()
             cycle = self._current_cycle(db, user["user_id"])
             cycle_id = cycle["cycle_id"] if cycle else None
             cycle_view = {
@@ -1220,42 +1974,62 @@ class ControlPlane:
             pools = []
             unknown_pool = False
             for pool_id in POOL_NAMES:
-                nodes = self._active_pool_nodes(db, pool_id)
-                allowance_row = db.execute(
-                    """SELECT allowance_bytes FROM entitlements
-                       WHERE user_id=? AND pool_id=? AND status='active'
-                       ORDER BY effective_from DESC LIMIT 1""",
-                    (user["user_id"], pool_id),
-                ).fetchone()
+                nodes = self._active_pool_nodes(db, pool_id, now)
+                access_by_node = {
+                    node_id: self._access_at(db, user, node_id, now)
+                    for node_id in nodes
+                }
+                allowed_nodes = [
+                    node_id for node_id in nodes
+                    if access_by_node[node_id]["decision"] == "allow"
+                ]
+                allowance_row = self._entitlement_at(db, user["user_id"], pool_id, now)
                 has_entitlement = allowance_row is not None
-                if nodes:
+                if allowed_nodes:
                     placeholders = ",".join("?" for _ in nodes)
                     relevant_rows = db.execute(
-                        f"SELECT DISTINCT node_id FROM credentials WHERE user_id=? AND status='active' AND node_id IN ({placeholders})",
-                        (user["user_id"], *nodes),
+                        f"SELECT DISTINCT node_id FROM credentials WHERE user_id=? AND status='active' AND node_id IN ({','.join('?' for _ in allowed_nodes)})",
+                        (user["user_id"], *allowed_nodes),
                     ).fetchall()
                     relevant_nodes = [r[0] for r in relevant_rows]
                 else:
                     relevant_nodes = []
-                statuses = [self._latest_coverage(db, n) for n in relevant_nodes]
-                not_applicable = not relevant_nodes and not has_entitlement
-                coverage_known = not_applicable or (bool(relevant_nodes) and all(s == "available" for s in statuses))
+                # A plan entitlement is an eligibility/default, not evidence
+                # that a per-user runtime credential is configured. Until a
+                # credential exists this pool has no customer observation and
+                # is therefore not applicable to the current projection. An
+                # unmapped runtime identity is different: it is a coverage
+                # gap, not an actual zero.
+                unmapped_runtime = False
+                if nodes:
+                    unmapped_runtime = db.execute(
+                        f"""SELECT 1 FROM credentials
+                            WHERE status='active' AND user_id IS NULL
+                              AND node_id IN ({','.join('?' for _ in nodes)}) LIMIT 1""",
+                        nodes,
+                    ).fetchone() is not None
+                not_applicable = not relevant_nodes and not has_entitlement and not unmapped_runtime
                 unresolved = 0
                 missing_counters = 0
-                if cycle_id and relevant_nodes:
-                    placeholders = ",".join("?" for _ in relevant_nodes)
+                usage_by_node = []
+                for node_id in relevant_nodes:
+                    coverage_row = self._latest_coverage_record(db, node_id)
+                    coverage_status = self._coverage_status(coverage_row) or "unknown"
                     credential_hashes = db.execute(
-                        f"SELECT runtime_ref_hash FROM credentials WHERE user_id=? AND status='active' AND node_id IN ({placeholders})",
-                        (user["user_id"], *relevant_nodes),
+                        """SELECT runtime_ref_hash FROM credentials
+                           WHERE user_id=? AND node_id=? AND status='active'""",
+                        (user["user_id"], node_id),
                     ).fetchall()
                     hashes = [row[0] for row in credential_hashes]
-                    if hashes:
+                    node_missing = 0
+                    node_unresolved = 0
+                    if cycle_id and hashes:
                         hash_placeholders = ",".join("?" for _ in hashes)
                         observation_where = [
-                            f"o.node_id IN ({placeholders})",
+                            "o.node_id=?",
                             f"o.runtime_ref_hash IN ({hash_placeholders})",
                         ]
-                        observation_params: list[object] = [*relevant_nodes, *hashes]
+                        observation_params: list[object] = [node_id, *hashes]
                         if cycle["starts_at"] is not None:
                             observation_where.append("o.observed_at >= ?")
                             observation_params.append(cycle["starts_at"])
@@ -1266,30 +2040,45 @@ class ControlPlane:
                             f"SELECT COUNT(DISTINCT o.runtime_ref_hash) FROM usage_observations o WHERE {' AND '.join(observation_where)}",
                             observation_params,
                         ).fetchone()[0]
-                        missing_counters = max(0, len(hashes) - int(observed_hashes))
-                    unresolved = db.execute(
-                        f"""SELECT COUNT(*)
-                            FROM usage_ledger l JOIN usage_observations o ON o.observation_id=l.observation_id
-                            WHERE l.node_id IN ({placeholders}) AND l.cycle_id=?
-                              AND l.attribution_status!='attributed'
-                              AND o.runtime_ref_hash IN (
-                                  SELECT runtime_ref_hash FROM credentials
-                                  WHERE user_id=? AND status='active'
-                              )""",
-                        (*relevant_nodes, cycle_id, user["user_id"]),
-                    ).fetchone()[0]
-                if unresolved or missing_counters:
-                    coverage_known = False
-                used = None
-                if coverage_known and cycle_id and relevant_nodes:
-                    placeholders = ",".join("?" for _ in relevant_nodes)
-                    row = db.execute(
-                        f"""SELECT COALESCE(SUM(delta_uplink_bytes+delta_downlink_bytes),0)
-                            FROM usage_ledger WHERE user_id=? AND pool_id=? AND cycle_id=?
-                              AND node_id IN ({placeholders})""",
-                        (user["user_id"], pool_id, cycle_id, *relevant_nodes),
-                    ).fetchone()
-                    used = int(row[0])
+                        node_missing = max(0, len(hashes) - int(observed_hashes))
+                        node_unresolved = db.execute(
+                            f"""SELECT COUNT(*)
+                                FROM usage_ledger l JOIN usage_observations o ON o.observation_id=l.observation_id
+                                WHERE l.user_id=? AND l.node_id=? AND l.cycle_id=?
+                                  AND l.attribution_status!='attributed'
+                                  AND o.runtime_ref_hash IN ({hash_placeholders})""",
+                            (user["user_id"], node_id, cycle_id, *hashes),
+                        ).fetchone()[0]
+                    node_known = bool(cycle_id and coverage_status == "available"
+                                      and node_missing == 0 and node_unresolved == 0)
+                    node_used = None
+                    if node_known:
+                        node_used = int(db.execute(
+                            """SELECT COALESCE(SUM(delta_uplink_bytes+delta_downlink_bytes),0)
+                               FROM usage_ledger WHERE user_id=? AND node_id=? AND pool_id=? AND cycle_id=?
+                                 AND attribution_status='attributed'""",
+                            (user["user_id"], node_id, pool_id, cycle_id),
+                        ).fetchone()[0])
+                    unresolved += int(node_unresolved)
+                    missing_counters += int(node_missing)
+                    access = access_by_node[node_id]
+                    usage_by_node.append({
+                        "node_id": node_id,
+                        "node_name": access["node_name"],
+                        "allocation_role": access["allocation_role"],
+                        "coverage_status": coverage_status,
+                        "coverage_observed_at": coverage_row["observed_at"] if coverage_row else None,
+                        "coverage_age_seconds": self._coverage_age_seconds(coverage_row),
+                        "used_bytes": node_used,
+                        "unresolved_observations": int(node_unresolved),
+                        "missing_counters": int(node_missing),
+                    })
+                coverage_known = not_applicable or (
+                    bool(relevant_nodes) and all(item["used_bytes"] is not None for item in usage_by_node)
+                )
+                used = None if not relevant_nodes else (
+                    sum(item["used_bytes"] or 0 for item in usage_by_node) if coverage_known else None
+                )
                 allowance = (
                     int(allowance_row[0])
                     if cycle and bool(cycle["commercial_applies"])
@@ -1312,17 +2101,26 @@ class ControlPlane:
                     "unresolved_observations": unresolved,
                     "missing_counters": missing_counters,
                     "nodes": relevant_nodes,
+                    "usage_by_node": usage_by_node,
                 })
             total = None if unknown_pool else sum(p["used_bytes"] or 0 for p in pools)
             upgrade = db.execute(
                 """SELECT request_id,to_plan,status,requested_at FROM upgrade_requests
                    WHERE user_id=? ORDER BY requested_at DESC LIMIT 1""", (user["user_id"],)
             ).fetchone()
-            subscription_count = db.execute(
-                """SELECT COUNT(*) FROM subscription_entries
-                   WHERE user_id=? AND enabled=1 AND projection_status='current' AND protocol!='anytls'""",
+            subscription_entries = db.execute(
+                """SELECT node_id,protocol FROM subscription_entries
+                   WHERE user_id=? AND enabled=1 AND projection_status='current'
+                     AND lower(protocol)!='anytls'""",
                 (user["user_id"],),
-            ).fetchone()[0]
+            ).fetchall()
+            subscription_count = sum(
+                1 for item in subscription_entries
+                if item["node_id"] is None
+                or self._subscription_access_allowed(
+                    self._access_at(db, user, item["node_id"], now), item["protocol"]
+                )
+            )
         return {
             "user_id": user["user_id"],
             "display_name": user["display_name"],
@@ -1345,15 +2143,24 @@ class ControlPlane:
         user = self._user_by_subscription_token(token)
         with self.connect() as db:
             rows = db.execute(
-                """SELECT uri FROM subscription_entries
-                   WHERE user_id=? AND enabled=1 AND projection_status='current' AND protocol!='anytls'
+                """SELECT node_id,protocol,uri FROM subscription_entries
+                   WHERE user_id=? AND enabled=1 AND projection_status='current' AND lower(protocol)!='anytls'
                    AND ? >= CASE minimum_plan WHEN 'Free' THEN 0 WHEN 'Basic' THEN 1 ELSE 2 END
                    ORDER BY entry_id""",
                 (user["user_id"], PLAN_ORDER[user["plan"]]),
             ).fetchall()
-        if not rows:
+            access_by_node = {
+                item["node_id"]: item
+                for item in self.effective_access(user["user_id"])
+            }
+        projected_rows = [
+            row for row in rows
+            if row["node_id"] is None
+            or self._subscription_access_allowed(access_by_node.get(row["node_id"]), row["protocol"])
+        ]
+        if not projected_rows:
             raise ServiceUnavailable("subscription is not configured")
-        return base64.b64encode(("\n".join(r[0] for r in rows) + "\n").encode()).decode() + "\n"
+        return base64.b64encode(("\n".join(r["uri"] for r in projected_rows) + "\n").encode()).decode() + "\n"
 
     def request_upgrade(self, token: str, target_plan: str) -> dict:
         user = self._user_by_token(token)
@@ -1411,6 +2218,15 @@ class ControlPlane:
                 if (credential is None or credential[0] != user_id
                         or credential[1] != node_id or credential[2] != protocol):
                     raise ControlPlaneError("subscription credential does not match entry")
+            if projection_status == "current" and node_id:
+                user = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+                access = self._access_at(db, user, node_id, utc_now())
+                if access["decision"] != "allow":
+                    raise Conflict("subscription node is not currently allowed for user")
+                if access["capability"]["subscription_status"] != "allowed":
+                    raise Conflict("subscription capability is not currently available")
+                if protocol.lower() not in access["capability"]["supported_protocols"]:
+                    raise Conflict("subscription protocol is not supported by node")
             db.execute(
                 """INSERT INTO subscription_entries
                    (entry_id,user_id,node_id,pool_id,credential_id,protocol,uri,minimum_plan,
@@ -1423,14 +2239,23 @@ class ControlPlane:
 
     def admin_overview(self) -> dict:
         with self.connect() as db:
+            now = utc_now()
             nodes = []
             for row in db.execute("SELECT * FROM nodes ORDER BY node_id"):
+                pool_id = self._pool_at(db, row["node_id"], now)
                 pool = db.execute(
                     """SELECT pool_id,status FROM node_pool_memberships
-                       WHERE node_id=? AND status='active' AND effective_to IS NULL
-                       ORDER BY effective_from DESC LIMIT 1""", (row["node_id"],)
-                ).fetchone()
+                       WHERE node_id=? AND pool_id=? AND status='active'
+                         AND effective_from <= ? AND (effective_to IS NULL OR effective_to > ?)
+                       ORDER BY effective_from DESC LIMIT 1""",
+                    (row["node_id"], pool_id, now, now),
+                ).fetchone() if pool_id else None
                 coverage = self._latest_coverage_record(db, row["node_id"])
+                capability = db.execute(
+                    """SELECT access_status,subscription_status,metering_status,quota_status,
+                              supported_protocols,source,observed_at,detail
+                       FROM node_capabilities WHERE node_id=?""", (row["node_id"],)
+                ).fetchone()
                 usage = db.execute(
                     """SELECT COALESCE(SUM(delta_uplink_bytes+delta_downlink_bytes),0)
                        FROM usage_ledger WHERE node_id=?""", (row["node_id"],)
@@ -1443,6 +2268,17 @@ class ControlPlane:
                     "coverage_status": self._coverage_status(coverage) or "unknown",
                     "coverage_observed_at": coverage["observed_at"] if coverage else None,
                     "coverage_age_seconds": self._coverage_age_seconds(coverage),
+                    "capability": {
+                        "access_status": capability["access_status"] if capability else "allowed",
+                        "subscription_status": capability["subscription_status"] if capability else "allowed",
+                        "metering_status": capability["metering_status"] if capability else "unknown",
+                        "quota_status": capability["quota_status"] if capability else "unavailable",
+                        "supported_protocols": json.loads(capability["supported_protocols"])
+                            if capability else ["vless"],
+                        "source": capability["source"] if capability else "node_seed",
+                        "observed_at": capability["observed_at"] if capability else None,
+                        "detail": capability["detail"] if capability else "",
+                    },
                 })
             users = []
             for row in db.execute("SELECT user_id,display_name,plan,role,status FROM users ORDER BY user_id"):
@@ -1469,6 +2305,36 @@ class ControlPlane:
                           source,traffic_reset_authoritative
                    FROM provider_resource_cycles ORDER BY resource_id,cycle_key"""
             )]
+            snapshots = [dict(row) for row in db.execute(
+                """SELECT snapshot_id,resource_id,capacity_bytes,used_bytes,remaining_bytes,
+                          resource_cycle_start,resource_cycle_end,next_reset_at,financial_cycle,
+                          next_due_at,observed_at,source,status,detail
+                   FROM provider_resource_snapshots ORDER BY resource_id,observed_at DESC"""
+            )]
+            latest_snapshots = {}
+            for snapshot in snapshots:
+                latest_snapshots.setdefault(snapshot["resource_id"], snapshot)
+            for snapshot in latest_snapshots.values():
+                observed = parse_time(snapshot["observed_at"])
+                if snapshot["status"] == "available" and observed:
+                    age = max(0, int((datetime.now(timezone.utc) - observed).total_seconds()))
+                    snapshot["freshness_status"] = (
+                        "stale" if age > self.coverage_max_age_seconds else "available"
+                    )
+                    snapshot["age_seconds"] = age
+                else:
+                    snapshot["freshness_status"] = snapshot["status"]
+                    snapshot["age_seconds"] = None
+            heartbeats = [dict(row) for row in db.execute(
+                """SELECT heartbeat_id,collector_id,status,observed_at,attempted_nodes,
+                          ingested_nodes,failed_nodes,source,detail
+                   FROM collector_heartbeats ORDER BY collector_id,observed_at DESC"""
+            )]
+            latest_heartbeats = {}
+            for heartbeat in heartbeats:
+                latest_heartbeats.setdefault(heartbeat["collector_id"], heartbeat)
+            for heartbeat in latest_heartbeats.values():
+                heartbeat["age_seconds"] = self._coverage_age_seconds(heartbeat)
             unresolved = db.execute(
                 "SELECT COUNT(*) FROM usage_ledger WHERE attribution_status!='attributed'"
             ).fetchone()[0]
@@ -1478,6 +2344,22 @@ class ControlPlane:
             pending = db.execute(
                 "SELECT COUNT(*) FROM upgrade_requests WHERE status='pending_manual_review'"
             ).fetchone()[0]
+        raw_user_ids = [user["user_id"] for user in users]
+        detailed_users = [self.admin_user_detail(user_id) for user_id in raw_user_ids]
+        users = [
+            {
+                "user_id": detail["user_id"], "display_name": detail["display_name"],
+                "plan": detail["plan"], "role": detail["role"], "status": detail["status"],
+                "usage_by_pool_bytes": detail["usage_by_pool_bytes"],
+                "usage_by_node": detail["usage_by_node"],
+                "usage_bytes": detail["usage_bytes"],
+                "effective_access": detail["effective_access"],
+                "subscription_status": detail["subscription_status"],
+                "subscription_entry_count": detail["subscription_entry_count"],
+                "migration_latest": detail["migration_latest"],
+            }
+            for detail in detailed_users
+        ]
         return {
             "nodes": nodes,
             "users": users,
@@ -1489,6 +2371,8 @@ class ControlPlane:
             },
             "infrastructure_resources": resources,
             "provider_resource_cycles": provider_cycles,
+            "provider_resource_snapshots": list(latest_snapshots.values()),
+            "collector_heartbeats": list(latest_heartbeats.values()),
             "unresolved_usage_records": int(unresolved),
             "unresolved_credentials": int(unresolved_credentials),
             "pending_upgrade_requests": int(pending),
@@ -1583,6 +2467,10 @@ class App:
             if path == "/api/admin/users" and method == "GET":
                 self.control._require_admin(self._bearer(environ))
                 return self._reply(start_response, 200, json_bytes({"users": self.control.admin_users()}))
+            if path.startswith("/api/admin/users/") and method == "GET":
+                self.control._require_admin(self._bearer(environ))
+                user_id = unquote(path[len("/api/admin/users/"):])
+                return self._reply(start_response, 200, json_bytes(self.control.admin_user_detail(user_id)))
             if path == "/api/admin/token-issuance" and method == "POST":
                 self.control._require_admin(self._bearer(environ))
                 body = self._read_json(environ)
@@ -1596,8 +2484,69 @@ class App:
                 body = self._read_json(environ)
                 if body.get("token_kind") != "subscription_legacy":
                     raise ControlPlaneError("only legacy Subscription hash revocation is supported")
-                value = self.control.revoke_legacy_subscription(str(body["user_id"]))
+                value = self.control.revoke_legacy_subscription(
+                    str(body["user_id"]), str(body.get("confirmation", ""))
+                )
                 return self._reply(start_response, 200, json_bytes(value))
+            if path == "/api/admin/migration-event" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.record_migration_event(
+                    str(body["user_id"]), str(body["subject_kind"]), str(body["subject_ref"]),
+                    str(body["state"]), str(body["source"]), str(body.get("detail", "")),
+                    body.get("observed_at"),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
+            if path == "/api/admin/collector-heartbeat" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.record_collector_heartbeat(
+                    str(body["collector_id"]), str(body["status"]), int(body["attempted_nodes"]),
+                    int(body["ingested_nodes"]), int(body["failed_nodes"]), str(body.get("source", "collector")),
+                    str(body.get("detail", "")), body.get("observed_at"),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
+            if path == "/api/admin/entitlement" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.set_entitlement(
+                    str(body["user_id"]), str(body["pool_id"]), str(body["plan"]),
+                    body.get("allowance_bytes"), body.get("effective_from"),
+                )
+                return self._reply(start_response, 201, json_bytes({"entitlement_id": value}))
+            if path == "/api/admin/provider-snapshot" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                value = self.control.record_provider_resource_snapshot(self._read_json(environ))
+                return self._reply(start_response, 201, json_bytes({"snapshot_id": value}))
+            if path == "/api/admin/node-admission" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.admit_node(
+                    str(body["node_id"]), str(body["pool_id"]), str(body.get("qualification", "conditional")),
+                    str(body.get("source", "operator")), body.get("effective_from"),
+                    str(body.get("metering_status", "unknown")), body.get("supported_protocols", ["vless"]),
+                    str(body.get("detail", "")),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
+            if path == "/api/admin/access-override" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.set_access_override(
+                    str(body["user_id"]), str(body["node_id"]), str(body["decision"]),
+                    str(body["allocation_role"]), str(body["reason"]), str(body["source"]),
+                    body.get("effective_from"), body.get("effective_to"),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
+            if path == "/api/admin/operational-budget" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.set_operational_budget(
+                    str(body["user_id"]), int(body["allowance_bytes"]), body.get("node_id"),
+                    body.get("pool_id"), body.get("provider_cycle_id"), str(body.get("budget_kind", "policy_only")),
+                    str(body["reason"]), str(body.get("source", "operator")),
+                    body.get("effective_from"), body.get("effective_to"),
+                )
+                return self._reply(start_response, 201, json_bytes(value))
             if path == "/api/admin/coverage" and method == "POST":
                 self.control._require_admin(self._bearer(environ))
                 body = self._read_json(environ)
