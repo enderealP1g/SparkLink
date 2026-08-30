@@ -584,7 +584,7 @@ def admit_control_plane(args: argparse.Namespace, entries: list[dict]) -> dict:
         "source": "dedirock-runtime-admission-2026-08-30",
         "metering_status": "unknown",
         "supported_protocols": ["vless"],
-        "detail": "direct Reality VLESS access verified; DediRock per-user Stats source unavailable; Usage Unknown; quota unavailable",
+        "detail": "direct Reality VLESS ingress with managed HyTru/WARP egress verified; DediRock per-user Stats source unavailable; Usage Unknown; quota unavailable",
         "entries": entries,
     }
     with operator.selected_endpoint(cp_endpoint_args(args)) as endpoint:

@@ -108,3 +108,24 @@ Evidence date: 2026-08-29. Evidence sources were re-read from the checked-out `m
 - The current live mapping is stable by Node and old route suffix: QQG `hypro02` is LA-02, VMISS is LA-01, RackNerd is Standard-NY, and odd/even legacy suffixes preserve HyTru/Origin semantics. DediRock's user-specific display suffix was removed to make its Advanced remark shared across Users.
 - Only current enabled VLESS entries were eligible. The public pass covered 22 accessible entries; a second Admin-safe pass also renamed abing's two current-but-denied VMISS entries. Legacy/shared subscription entries remained untouched, and no VeilShift entry was changed. The Admin endpoint rejects non-current, disabled, non-VLESS, unknown, malformed, and colliding alias requests.
 - Independent public projection verification confirmed that the new names are presentation-only: every entry's URI core (including identity and query parameters) matched the pre-apply snapshot. No credential, Plan, Pool, access, metering, quota, or runtime state changed.
+
+## 2026-08-30 — DediRock HyTru route repair and naming decision
+
+- A fresh read-only probe of `dedirock-admin` found four managed Advanced
+  client identities in the live Reality inbound. Their email labels are
+  `sparklink:<user>:advanced`; no credential values were recorded.
+- Before repair, all four isolated managed-client checks returned `warp=off`:
+  the live `warp` WireGuard outbound existed, but no exact managed-user route
+  rule selected it. A route repair added one exact-user `outboundTag=warp`
+  rule, after an SHA-guarded root-only backup and Xray config validation.
+- Four post-repair isolated public checks returned `warp=on`; a second apply
+  was idempotent and reported `changed=false`. The current DediRock display
+  alias is `Advanced-LA-HyTru-Direct-Reality`; the old Origin and
+  user-specific forms are migration inputs only. The repair did not add
+  entries, rotate credentials, revoke legacy access, or change metering/quota
+  semantics.
+- The protected rollback artifact is
+  `/var/backups/sparklink-identity-migration/20260830T070546Z-dedirock-hytru-route/xray-config.json`
+  (`root:root`, file `0600`, parent directory `0700`). A before/after
+  structural comparison found only the routing rule changed; Xray, Nginx, and
+  sing-box remained active.

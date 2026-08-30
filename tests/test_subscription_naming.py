@@ -4,6 +4,7 @@ from urllib.parse import unquote, urlsplit
 from deploy import standardize_subscription_names as standardizer
 from src.sparklink_subscription_naming import (
     CANONICAL_DEDIROCK_ALIAS,
+    CANONICAL_DEDIROCK_ALIASES,
     SubscriptionNamingError,
     alias_from_uri,
     canonical_alias,
@@ -27,10 +28,26 @@ class SubscriptionNamingTests(unittest.TestCase):
             "Standard-NY-HyTru-Direct-Reality",
         )
 
-    def test_dedirock_is_common_and_veilshift_is_preserved(self):
+    def test_dedirock_uses_route_name_and_veilshift_is_preserved(self):
         self.assertEqual(
             canonical_alias("dedirock", "SparkLink-Hegin-DediRock-Advanced"),
             CANONICAL_DEDIROCK_ALIAS,
+        )
+        self.assertEqual(CANONICAL_DEDIROCK_ALIAS, "Advanced-LA-HyTru-Direct-Reality")
+        self.assertEqual(
+            canonical_alias("dedirock", "Advanced-LA-HyTru-Direct-Reality"),
+            "Advanced-LA-HyTru-Direct-Reality",
+        )
+        self.assertEqual(
+            canonical_alias("dedirock", "Advanced-LA-Origin-Direct-Reality"),
+            "Advanced-LA-HyTru-Direct-Reality",
+        )
+        self.assertEqual(
+            CANONICAL_DEDIROCK_ALIASES,
+            frozenset({
+                "Advanced-LA-Origin-Direct-Reality",
+                "Advanced-LA-HyTru-Direct-Reality",
+            }),
         )
         veilshift = "VeilShift-Optimized"
         self.assertEqual(canonical_alias("unknown-node", veilshift), veilshift)

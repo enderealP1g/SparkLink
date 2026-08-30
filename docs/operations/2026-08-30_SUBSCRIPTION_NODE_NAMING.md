@@ -6,6 +6,8 @@ This checkpoint standardizes the user-facing VLESS URI fragment, which is the
 node remark displayed by clients such as v2rayN. It does not rename a Control
 Plane Node identity and does not change an endpoint, UUID, Reality parameter,
 route, Pool, credential, or Usage association.
+The separate DediRock HyTru route repair below changes only the live routing
+rule; its display alias is updated only after that runtime acceptance passes.
 
 The naming rule is shared by `root` and all other Users. Existing VeilShift
 labels are preserved exactly as an exception because that label is already
@@ -18,12 +20,17 @@ defined by Product Intent.
 | `hypro02` / QQG LA-02 | `Pro-LA-02-HyTru-Direct-Reality`, `Pro-LA-02-Origin-Direct-Reality` |
 | `vmiss` / LA-01 | `Pro-LA-01-HyTru-Direct-Reality`, `Pro-LA-01-Origin-Direct-Reality` |
 | `racknerd` / NY Standard | `Standard-NY-HyTru-Direct-Reality`, `Standard-NY-Origin-Direct-Reality` |
-| `dedirock` / Advanced | `SparkLink-DediRock-Advanced` |
+| `dedirock` / Advanced | `Advanced-LA-HyTru-Direct-Reality` (current managed HyTru/WARP path); `Advanced-LA-Origin-Direct-Reality` remains a recognized migration input |
 | VeilShift | Existing label unchanged |
 
 The old `Plus|Basic-LA|NY-Xray-VLESS-REALITY-N` labels use the established
 odd/even route convention: odd suffixes map to `HyTru`, even suffixes map to
 `Origin`. An unrecognized label or Node fails closed instead of being guessed.
+The current DediRock managed `sparklink:<user>:advanced` clients are covered by
+an exact-user rule to the live `warp` WireGuard outbound. Therefore existing
+`SparkLink-<user>-DediRock-Advanced` and pre-repair Origin remarks are
+normalized to `Advanced-LA-HyTru-Direct-Reality`. The Origin form remains
+recognized only as a migration input for this current single managed route.
 
 ## Implementation
 
@@ -41,6 +48,14 @@ odd/even route convention: odd suffixes map to `HyTru`, even suffixes map to
   apply, it submits the in-memory old aliases as a rollback.
 - Retained legacy subscription rows are not changed because they are not part
   of the current personal projection.
+- Future DediRock admission uses the current HyTru/WARP canonical alias;
+  the old user-specific DediRock form remains recognized only as a migration
+  input. The alias change does not create a second DediRock entry or change
+  the managed credential, endpoint, route, or entitlement.
+- `python deploy/repair_dedirock_hytru.py preview|apply` is the repeatable
+  runtime route repair. It requires four current managed Advanced identities,
+  the existing WireGuard `warp` outbound, an SHA-guarded root-only backup, and
+  four isolated `warp=on` public checks before reporting success.
 
 The regular operator command is:
 
@@ -67,6 +82,18 @@ they remain in memory and are never printed.
   zero entries.
 - URI core comparisons passed for every entry: endpoint, identity, query and
   route parameters were unchanged; only the fragment differed.
+- The pre-repair DediRock probe found four managed Advanced clients with no
+  explicit user route; all four isolated checks returned `warp=off`. The
+  reversible route repair added one exact-user `outboundTag=warp` rule while
+  preserving the existing clients and static Origin/HyTru rules.
+- The remote rollback artifact is root-only at
+  `/var/backups/sparklink-identity-migration/20260830T070546Z-dedirock-hytru-route/xray-config.json`
+  (directory `0700`, file `0600`, `root:root`). Non-routing config, all client
+  identities, and the existing DediRock services were preserved.
+- Post-repair isolated checks returned `warp=on` for all four managed Users;
+  the second operator run was idempotent (`changed=false`) and again passed
+  4/4. The current display spelling is therefore
+  `Advanced-LA-HyTru-Direct-Reality`.
 - Root Portal acceptance still passed as `Plus` / `OWNER`, cycle
   `legacy-pre-baseline`, independent `STANDARD` / `ADVANCED` / `PREMIUM`
   pools, and self-scoped `/api/me` data. Wrong and cross-kind token checks

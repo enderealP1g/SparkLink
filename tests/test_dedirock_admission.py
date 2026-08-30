@@ -63,7 +63,7 @@ class DediRockAdmissionTests(unittest.TestCase):
             self.assertEqual(parsed.port, 443)
             self.assertEqual(
                 admit_dedirock.urllib.parse.unquote(parsed.fragment),
-                "SparkLink-DediRock-Advanced",
+                "Advanced-LA-HyTru-Direct-Reality",
             )
             self.assertEqual(entry["credential_kind"], "managed")
             self.assertEqual(entry["minimum_plan"], "Basic")

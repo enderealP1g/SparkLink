@@ -79,3 +79,21 @@ Product Owner approved autonomous construction of P0-P6 on 2026-08-29. P0 is com
 - Live preview found 22 current projected entries across six Users and 16 old aliases. The Admin-safe second pass included abing's two current-but-denied VMISS entries; final reconciliation covered all 24 current VLESS entries. Fresh preview found zero remaining changes. Fresh public verification passed root/Hegin/abing/dangbin at 7/7/5/3 entries, while Free Users remained `503 / not_configured`.
 - Root OWNER acceptance remained valid: Plus, OWNER, `legacy-pre-baseline`, Standard/Advanced/Premium, and self-scoped `/api/me`. All six Portal credentials still authenticated; no token rotation, legacy revoke, Node runtime change, or Usage mutation occurred.
 - Control Plane deployment used rollback `/var/backups/sparklink-control-plane/subscription-naming-20260830T061930Z`; service health recovered after the probe script itself was corrected. The final candidate passed local regression, syntax, and URI fragment-only tests.
+
+## 2026-08-30 — DediRock HyTru route repair and naming refinement
+
+- The pre-repair live DediRock config had a working WireGuard `warp` outbound
+  but no managed-user route; four isolated clients all observed `warp=off`.
+  Added `deploy/repair_dedirock_hytru.py` with exact-user rule construction,
+  SHA-guarded root-only backup, atomic write, Xray validation, service restart,
+  automatic rollback, and redacted acceptance.
+- Live repair passed 4/4 isolated managed-user checks with `warp=on`; the
+  follow-up apply was idempotent (`changed=false`) and passed 4/4 again. The
+  current DediRock canonical display alias is now
+  `Advanced-LA-HyTru-Direct-Reality`; Origin/user-specific aliases are
+  migration inputs. No credential, subscription token, legacy/shared access,
+  Usage, or quota policy was changed.
+- The route backup is retained at
+  `/var/backups/sparklink-identity-migration/20260830T070546Z-dedirock-hytru-route/xray-config.json`
+  with root-only `0700/0600` protection; structural comparison confirmed that
+  only routing changed and all three DediRock services remained active.

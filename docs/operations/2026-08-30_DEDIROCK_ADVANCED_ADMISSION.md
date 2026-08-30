@@ -6,7 +6,7 @@
 
 | Item | Evidence |
 | --- | --- |
-| Runtime path | Direct `dedirock.enrpiglink.top:443` Xray VLESS Reality |
+| Runtime path | Direct `dedirock.enrpiglink.top:443` Xray VLESS Reality ingress with managed HyTru/WARP egress |
 | Managed Users | `root`, `Hegin`, `abing`, `dangbin` |
 | Runtime identity action | Four existing stable managed identities reused; no unnecessary rotate/restart |
 | Isolated client acceptance | 4/4 real transient Xray clients completed public HTTPS request |
@@ -14,6 +14,21 @@
 | Metering | `Unknown`; no per-user Stats source is available |
 | Quota | `unavailable`; 700GB remains policy-only |
 | Legacy/shared access | Unchanged |
+
+After admission, a read-only route audit found that the four managed Advanced
+identities were not covered by the existing static HyTru rules and all four
+isolated checks observed `warp=off`. The reversible repair command added one
+exact-user `outboundTag=warp` rule without changing the old clients or static
+Origin/HyTru rules. Xray configuration validation and service recovery passed;
+four fresh isolated public checks then observed `warp=on`. A second run was
+idempotent and reported no config change.
+
+The route rollback artifact is root-only at
+`/var/backups/sparklink-identity-migration/20260830T070546Z-dedirock-hytru-route/xray-config.json`
+with directory mode `0700` and file mode `0600`. A structural comparison
+confirmed that only the routing section changed; all clients, outbounds, and
+other top-level configuration remained equal. Xray, Nginx, and sing-box were
+active after acceptance.
 
 The admission runner is idempotent. Its first successful Control Plane registration created four managed credentials and four current Advanced projection entries; a follow-up run reused all eight records and did not create duplicate active membership. Runtime identities are keyed by stable managed Xray email references; the Control Plane stores only the corresponding reference hashes.
 
@@ -50,6 +65,8 @@ From the repository root on the Windows control machine:
 
 ```powershell
 python deploy\admit_dedirock.py
+python deploy\repair_dedirock_hytru.py preview
+python deploy\repair_dedirock_hytru.py apply
 python deploy\issue_user_tokens.py reconcile
 python deploy\issue_user_tokens.py copy --user Hegin --kind portal
 python deploy\issue_user_tokens.py copy --user Hegin --kind subscription
@@ -60,4 +77,4 @@ The admission command emits only safe counts/status/path metadata. The six user 
 
 ## Deferred boundary
 
-DediRock XHTTP/Cloudflare, ShadowTLS, and AnyTLS paths remain outside the Advanced VLESS projection. Reliable per-user DediRock metering is still an open provider/runtime evidence task; no hard quota, automatic blocking, or synthetic attribution is allowed.
+DediRock XHTTP/Cloudflare, ShadowTLS, and AnyTLS paths remain outside the Advanced VLESS projection. Reliable per-user DediRock metering is still an open provider/runtime evidence task; no hard quota, automatic blocking, or synthetic attribution is allowed. Direct Reality ingress and HyTru/WARP egress are separate facts: access acceptance does not make metering available.

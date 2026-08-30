@@ -21,7 +21,15 @@ CANONICAL_PREFIX_BY_NODE = {
     "vmiss": "Pro-LA-01",
     "racknerd": "Standard-NY",
 }
-CANONICAL_DEDIROCK_ALIAS = "SparkLink-DediRock-Advanced"
+# DediRock's current managed clients are explicitly routed to the existing
+# `warp` WireGuard outbound, so their user-facing route name is HyTru.  Keep
+# both route spellings recognized as migration inputs; the current managed
+# projection is one route and is normalized to this canonical alias.
+CANONICAL_DEDIROCK_ALIAS = "Advanced-LA-HyTru-Direct-Reality"
+CANONICAL_DEDIROCK_ALIASES = frozenset({
+    "Advanced-LA-Origin-Direct-Reality",
+    "Advanced-LA-HyTru-Direct-Reality",
+})
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CANONICAL_RE = re.compile(
     r"^(?P<prefix>Pro-LA-(?:01|02)|Standard-NY)-(?P<route>HyTru|Origin)-Direct-Reality$"
@@ -56,7 +64,9 @@ def canonical_alias(node_id: str, current_alias: str) -> str:
         return alias
 
     if node == "dedirock":
-        if alias == CANONICAL_DEDIROCK_ALIAS or _DEDIROCK_RE.fullmatch(alias):
+        if (alias in CANONICAL_DEDIROCK_ALIASES
+                or alias == "SparkLink-DediRock-Advanced"
+                or _DEDIROCK_RE.fullmatch(alias)):
             return CANONICAL_DEDIROCK_ALIAS
         raise SubscriptionNamingError("dedirock_alias_unrecognized")
 
