@@ -42,6 +42,7 @@ MANAGED_EMAIL_SUFFIX = ":advanced"
 
 sys.path.insert(0, str(ROOT))
 from deploy import issue_user_tokens as operator  # noqa: E402
+from src.sparklink_subscription_naming import CANONICAL_DEDIROCK_ALIAS  # noqa: E402
 
 
 class AdmissionError(RuntimeError):
@@ -399,7 +400,7 @@ def runtime_ref_hash(email: str) -> str:
 
 
 def build_vless_uri(client_uuid: str, server_name: str, public_key: str,
-                    short_id: str, username: str) -> str:
+                    short_id: str) -> str:
     query = urllib.parse.urlencode({
         "encryption": "none",
         "flow": "xtls-rprx-vision",
@@ -410,7 +411,7 @@ def build_vless_uri(client_uuid: str, server_name: str, public_key: str,
         "sid": short_id,
         "type": "tcp",
     })
-    label = urllib.parse.quote(f"SparkLink-{username}-DediRock-Advanced", safe="")
+    label = urllib.parse.quote(CANONICAL_DEDIROCK_ALIAS, safe="")
     return f"vless://{client_uuid}@{DEFAULT_ENDPOINT_HOST}:443?{query}#{label}"
 
 
@@ -494,7 +495,7 @@ def build_runtime_plan(discovery: dict, users: list[dict]) -> tuple[list[dict], 
             raise AdmissionError("dedirock_client_uuid_invalid") from exc
         uri = build_vless_uri(
             client_uuid, discovery["server_name"], discovery["public_key"],
-            discovery["short_id"], username,
+            discovery["short_id"],
         )
         managed_entries.append({
             "user_id": user["user_id"],

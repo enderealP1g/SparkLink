@@ -72,6 +72,8 @@ Admission sequence completed: read-only discovery → protected rollback point �
 
 Implementation checkpoint: four provider adapters (RackNerd, VMISS, QQGNet, DediRock) now share a strict normalized snapshot contract and source priority. `deploy/collect_provider_snapshots.py` reads the local resource inventory, accepts only non-secret trusted exports, and records explicit `unknown` snapshots when no authorized source is configured. The live run recorded four `unknown / 4 recorded / 0 failed` management snapshots; no runtime or data-plane change occurred. Admin Infrastructure reads the latest local snapshot and does not synchronously call providers.
 
+Implementation checkpoint: current personal VLESS projection aliases now follow the shared user-facing naming system (`Pro-LA-01/02`, `Standard-NY`, and common `SparkLink-DediRock-Advanced` forms). VeilShift labels are preserved. An Admin-only fragment update workflow is transactional, entry-id scoped, and verifies that URI core fields remain unchanged.
+
 ### P7 — Quota/enforcement only after coverage is proven
 
 - Treat the 700 GB DediRock policy and abing's 200 GB QQG policy as non-enforcing operational policy until the corresponding User/Node counters and Provider Resource Cycle are reliable.

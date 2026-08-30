@@ -75,7 +75,7 @@ Evidence date: 2026-08-29. Evidence sources were re-read from the checked-out `m
 6. Premium allocation and operational allowances are explicit Product Owner policy but have no durable representation; implementing them requires an effective-time/audit model, not username branches.
 7. Legacy migration state is only a boolean-style retained hash plus local bundle metadata; it cannot prove fetched, traffic observed, or OWNER confirmation.
 
-## No-change boundary observed
+## Earlier no-change boundary observed
 
 - No Node configuration, DNS, Cloudflare route, Task Scheduler registration, Control Plane database, token, subscription, or credential was changed during this reconciliation.
 - The only local additions from this review are the `.planning/` review artifacts.
@@ -101,3 +101,10 @@ Evidence date: 2026-08-29. Evidence sources were re-read from the checked-out `m
 - Added a strict adapter registry and normalized snapshot contract with source priority `official_api` → `stable_endpoint` → `dashboard_export`. The contract rejects secret-like extra fields, incomplete `available` byte values, inconsistent `capacity = used + remaining`, and telemetry values attached to `unknown`/`unavailable` status.
 - A live `--dry-run` resolved all 4 resources. The live collector then appended 4 source-labelled `unknown` snapshots with `4 recorded / 0 failed`; capacity, used, remaining, reset, and next due are all null. Contract/inventory transfer and due fields were not promoted to telemetry.
 - Admin Infrastructure now reads the latest stored local snapshot and displays provider/resource/source/observed/freshness metadata. It does not synchronously call provider dashboards, and provider collection failures cannot affect the proxy data plane or Customer Usage.
+
+## 2026-08-30 — subscription display naming evidence
+
+- The live root projection already contained the requested canonical `Pro-LA-02-HyTru-Direct-Reality` form. Hegin, abing, and dangbin still had legacy plan-prefixed Xray/REALITY remarks; the public entry order aligned with safe Admin `entry_id` metadata.
+- The current live mapping is stable by Node and old route suffix: QQG `hypro02` is LA-02, VMISS is LA-01, RackNerd is Standard-NY, and odd/even legacy suffixes preserve HyTru/Origin semantics. DediRock's user-specific display suffix was removed to make its Advanced remark shared across Users.
+- Only current enabled VLESS entries were eligible. The public pass covered 22 accessible entries; a second Admin-safe pass also renamed abing's two current-but-denied VMISS entries. Legacy/shared subscription entries remained untouched, and no VeilShift entry was changed. The Admin endpoint rejects non-current, disabled, non-VLESS, unknown, malformed, and colliding alias requests.
+- Independent public projection verification confirmed that the new names are presentation-only: every entry's URI core (including identity and query parameters) matched the pre-apply snapshot. No credential, Plan, Pool, access, metering, quota, or runtime state changed.

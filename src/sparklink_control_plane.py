@@ -23,6 +23,11 @@ from urllib.parse import unquote, urlsplit
 from wsgiref.simple_server import WSGIRequestHandler, make_server
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+try:
+    from src.sparklink_subscription_naming import alias_from_uri, replace_uri_alias
+except ModuleNotFoundError:  # direct `python src/sparklink_control_plane.py` execution
+    from sparklink_subscription_naming import alias_from_uri, replace_uri_alias
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "web"
@@ -1581,12 +1586,16 @@ class ControlPlane:
                     usage_by_pool[pool_id] = used if current is None and pool_id not in usage_by_pool else (
                         None if current is None or used is None else current + used
                     )
-            entries = [dict(row) for row in db.execute(
+            entries = []
+            for row in db.execute(
                 """SELECT entry_id,node_id,pool_id,credential_id,protocol,minimum_plan,
-                          projection_status,enabled,created_at
+                          projection_status,enabled,created_at,uri
                    FROM subscription_entries WHERE user_id=? ORDER BY entry_id""",
                 (user_id,),
-            )]
+            ):
+                entry = dict(row)
+                entry["display_alias"] = alias_from_uri(entry.pop("uri"))
+                entries.append(entry)
             projected_entries = [
                 row for row in entries
                 if row["enabled"] and row["projection_status"] == "current"
@@ -2508,6 +2517,101 @@ class ControlPlane:
             )
         return entry_id
 
+    def rename_subscription_entries(self, entries: list[dict], source: str = "operator") -> dict:
+        """Change only current VLESS display fragments in one transaction.
+
+        The endpoint is intentionally entry-id based so an operator cannot
+        accidentally rename a different User's projection. URI core fields
+        are validated before any update, and duplicate aliases within one
+        User are rejected to keep client-side node selection unambiguous.
+        """
+
+        if not isinstance(entries, list) or not entries or len(entries) > 1000:
+            raise ControlPlaneError("subscription_alias_entries_invalid")
+        normalized: list[tuple[str, str]] = []
+        seen_entry_ids: set[str] = set()
+        for item in entries:
+            if not isinstance(item, dict):
+                raise ControlPlaneError("subscription_alias_entry_invalid")
+            entry_id = str(item.get("entry_id") or "").strip()
+            alias = str(item.get("alias") or "").strip()
+            if not entry_id or entry_id in seen_entry_ids:
+                raise Conflict("subscription_alias_entry_duplicate")
+            if len(entry_id) > 160 or len(alias) > 128:
+                raise ControlPlaneError("subscription_alias_entry_invalid")
+            seen_entry_ids.add(entry_id)
+            normalized.append((entry_id, alias))
+        source_value = str(source or "operator").strip()
+        if not source_value or len(source_value) > 160 or any(char.isspace() for char in source_value):
+            raise ControlPlaneError("subscription_alias_source_invalid")
+
+        with self.connect() as db:
+            staged: list[dict] = []
+            user_ids: set[str] = set()
+            for entry_id, alias in normalized:
+                row = db.execute(
+                    """SELECT entry_id,user_id,node_id,protocol,uri,projection_status,enabled
+                       FROM subscription_entries WHERE entry_id=?""",
+                    (entry_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFound("subscription entry not found")
+                if (row["projection_status"] != "current" or not row["enabled"]
+                        or row["protocol"].lower() != "vless"):
+                    raise Conflict("only current enabled VLESS entries can be renamed")
+                try:
+                    updated_uri = replace_uri_alias(row["uri"], alias)
+                except ValueError as exc:
+                    raise ControlPlaneError(str(exc)) from exc
+                staged.append({
+                    "entry_id": row["entry_id"], "user_id": row["user_id"],
+                    "node_id": row["node_id"], "old_uri": row["uri"],
+                    "new_uri": updated_uri, "alias": alias,
+                })
+                user_ids.add(row["user_id"])
+
+            # The request may contain only some of a User's entries. Include
+            # the untouched current entries in the collision check as well.
+            aliases_by_user: dict[str, dict[str, str]] = {}
+            for user_id in user_ids:
+                aliases_by_user[user_id] = {}
+                for row in db.execute(
+                    """SELECT entry_id,uri FROM subscription_entries
+                       WHERE user_id=? AND enabled=1 AND projection_status='current'
+                         AND lower(protocol)='vless'""",
+                    (user_id,),
+                ):
+                    aliases_by_user[user_id][row["entry_id"]] = alias_from_uri(row["uri"])
+            for item in staged:
+                aliases_by_user[item["user_id"]][item["entry_id"]] = alias_from_uri(item["new_uri"])
+            for aliases in aliases_by_user.values():
+                if len(aliases.values()) != len(set(aliases.values())):
+                    raise Conflict("subscription_alias_collision")
+
+            changed = 0
+            result_entries = []
+            for item in staged:
+                changed_entry = item["old_uri"] != item["new_uri"]
+                if changed_entry:
+                    db.execute(
+                        "UPDATE subscription_entries SET uri=? WHERE entry_id=?",
+                        (item["new_uri"], item["entry_id"]),
+                    )
+                    changed += 1
+                result_entries.append({
+                    "entry_id": item["entry_id"], "user_id": item["user_id"],
+                    "node_id": item["node_id"], "alias": item["alias"],
+                    "changed": changed_entry,
+                })
+        return {
+            "ok": True,
+            "requested": len(normalized),
+            "changed": changed,
+            "unchanged": len(normalized) - changed,
+            "source": source_value,
+            "entries": result_entries,
+        }
+
     def admin_overview(self) -> dict:
         with self.connect() as db:
             now = utc_now()
@@ -2852,6 +2956,13 @@ class App:
                     body.get("credential_id"), str(body.get("projection_status", "current")),
                 )
                 return self._reply(start_response, 201, json_bytes({"entry_id": value}))
+            if path == "/api/admin/subscription-aliases" and method == "POST":
+                self.control._require_admin(self._bearer(environ))
+                body = self._read_json(environ)
+                value = self.control.rename_subscription_entries(
+                    list(body["entries"]), str(body.get("source", "operator")),
+                )
+                return self._reply(start_response, 200, json_bytes(value))
             return self._reply(start_response, 404, json_bytes({"error": "not found"}))
         except ControlPlaneError as exc:
             return self._reply(start_response, exc.status, json_bytes({"error": str(exc)}))

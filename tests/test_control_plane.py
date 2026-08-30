@@ -506,6 +506,15 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("portal_token_hash", user)
         self.assertNotIn("subscription_token_hash", user)
 
+    def test_admin_user_detail_exposes_display_alias_without_uri(self):
+        self.cp.add_subscription_entry(
+            "usr_test", "hypro02", "PREMIUM", "vless",
+            "vless://synthetic#Pro-LA-02-HyTru-Direct-Reality",
+        )
+        entry = self.cp.admin_user_detail("usr_test")["subscription_entries"][0]
+        self.assertEqual(entry["display_alias"], "Pro-LA-02-HyTru-Direct-Reality")
+        self.assertNotIn("uri", entry)
+
     def test_subscription_and_portal_tokens_cannot_cross_authentication_boundaries(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic")
         with self.assertRaises(Unauthorized):
@@ -604,6 +613,61 @@ class ControlPlaneTests(unittest.TestCase):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic", "Plus")
         body = base64.b64decode(self.cp.subscription(self.user["subscription_token"]).strip()).decode()
         self.assertEqual(body, "vless://synthetic\n")
+
+    def test_subscription_alias_rename_is_fragment_only_and_rejects_legacy_entries(self):
+        entry_id = self.cp.add_subscription_entry(
+            "usr_test", "hypro02", "PREMIUM", "vless",
+            "vless://11111111-1111-4111-8111-111111111111@node.example:443"
+            "?security=reality&pbk=public-key#old-name", "Plus",
+        )
+        result = self.cp.rename_subscription_entries([
+            {"entry_id": entry_id, "alias": "Pro-LA-02-HyTru-Direct-Reality"},
+        ])
+        self.assertEqual(result["changed"], 1)
+        body = base64.b64decode(self.cp.subscription(self.user["subscription_token"]).strip()).decode()
+        self.assertIn("#Pro-LA-02-HyTru-Direct-Reality", body)
+        self.assertIn("?security=reality&pbk=public-key", body)
+        legacy_id = self.cp.add_subscription_entry(
+            "usr_test", "hypro02", "PREMIUM", "vless", "vless://legacy",
+            "Plus", projection_status="legacy",
+        )
+        with self.assertRaises(Conflict):
+            self.cp.rename_subscription_entries([
+                {"entry_id": legacy_id, "alias": "Pro-LA-02-Origin-Direct-Reality"},
+            ])
+
+    def test_subscription_alias_endpoint_is_admin_only(self):
+        entry_id = self.cp.add_subscription_entry(
+            "usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic#old", "Plus",
+        )
+        app = App(self.cp)
+        body = json.dumps({
+            "entries": [{"entry_id": entry_id, "alias": "Pro-LA-02-HyTru-Direct-Reality"}],
+        }).encode()
+
+        def call(admin_token):
+            environ = {
+                "REQUEST_METHOD": "POST", "PATH_INFO": "/api/admin/subscription-aliases",
+                "HTTP_AUTHORIZATION": f"Bearer {admin_token}",
+                "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body),
+                "wsgi.errors": io.StringIO(), "wsgi.version": (1, 0),
+                "wsgi.url_scheme": "http", "wsgi.multithread": False,
+                "wsgi.multiprocess": False, "wsgi.run_once": False,
+            }
+            result = {}
+
+            def start_response(status, headers):
+                result["status"] = status
+
+            response = b"".join(app(environ, start_response))
+            return result["status"], json.loads(response)
+
+        status, rejected = call("not-admin")
+        self.assertEqual(status, "401 Error")
+        self.assertNotIn("entries", rejected)
+        status, accepted = call("admin")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(accepted["changed"], 1)
 
     def test_bearer_subscription_endpoint_is_rejected_by_control_plane(self):
         self.cp.add_subscription_entry("usr_test", "hypro02", "PREMIUM", "vless", "vless://synthetic", "Plus")

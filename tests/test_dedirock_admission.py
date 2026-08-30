@@ -61,6 +61,10 @@ class DediRockAdmissionTests(unittest.TestCase):
             self.assertEqual(parsed.scheme, "vless")
             self.assertEqual(parsed.hostname, "dedirock.enrpiglink.top")
             self.assertEqual(parsed.port, 443)
+            self.assertEqual(
+                admit_dedirock.urllib.parse.unquote(parsed.fragment),
+                "SparkLink-DediRock-Advanced",
+            )
             self.assertEqual(entry["credential_kind"], "managed")
             self.assertEqual(entry["minimum_plan"], "Basic")
             self.assertEqual(len(entry["runtime_ref_hash"]), 64)
